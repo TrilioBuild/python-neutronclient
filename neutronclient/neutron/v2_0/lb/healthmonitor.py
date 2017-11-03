@@ -16,7 +16,7 @@
 
 from __future__ import print_function
 
-from neutronclient.i18n import _
+from neutronclient._i18n import _
 from neutronclient.neutron import v2_0 as neutronV20
 
 
@@ -66,7 +66,8 @@ class CreateHealthMonitor(neutronV20.CreateCommand):
         parser.add_argument(
             '--delay',
             required=True,
-            help=_('The time in seconds between sending probes to members.'))
+            help=_('The time in milliseconds between sending probes to '
+                   'members.'))
         parser.add_argument(
             '--max-retries',
             required=True,
@@ -75,8 +76,8 @@ class CreateHealthMonitor(neutronV20.CreateCommand):
         parser.add_argument(
             '--timeout',
             required=True,
-            help=_('Maximum number of seconds for a monitor to wait for a '
-                   'connection to be established before it times out. The '
+            help=_('Maximum number of milliseconds for a monitor to wait for '
+                   'a connection to be established before it times out. The '
                    'value must be less than the delay value.'))
         parser.add_argument(
             '--type',
@@ -84,19 +85,15 @@ class CreateHealthMonitor(neutronV20.CreateCommand):
             help=_('One of the predefined health monitor types.'))
 
     def args2body(self, parsed_args):
-        body = {
-            self.resource: {
-                'admin_state_up': parsed_args.admin_state,
+        body = {'admin_state_up': parsed_args.admin_state,
                 'delay': parsed_args.delay,
                 'max_retries': parsed_args.max_retries,
                 'timeout': parsed_args.timeout,
-                'type': parsed_args.type,
-            },
-        }
-        neutronV20.update_dict(parsed_args, body[self.resource],
+                'type': parsed_args.type}
+        neutronV20.update_dict(parsed_args, body,
                                ['expected_codes', 'http_method', 'url_path',
                                 'tenant_id'])
-        return body
+        return {self.resource: body}
 
 
 class UpdateHealthMonitor(neutronV20.UpdateCommand):
@@ -128,9 +125,8 @@ class AssociateHealthMonitor(neutronV20.NeutronCommand):
             help=_('ID of the pool to be associated with the health monitor.'))
         return parser
 
-    def run(self, parsed_args):
+    def take_action(self, parsed_args):
         neutron_client = self.get_client()
-        neutron_client.format = parsed_args.request_format
         body = {'health_monitor': {'id': parsed_args.health_monitor_id}}
         pool_id = neutronV20.find_resourceid_by_name_or_id(
             neutron_client, 'pool', parsed_args.pool_id)
@@ -155,9 +151,8 @@ class DisassociateHealthMonitor(neutronV20.NeutronCommand):
             help=_('ID of the pool to be associated with the health monitor.'))
         return parser
 
-    def run(self, parsed_args):
+    def take_action(self, parsed_args):
         neutron_client = self.get_client()
-        neutron_client.format = parsed_args.request_format
         pool_id = neutronV20.find_resourceid_by_name_or_id(
             neutron_client, 'pool', parsed_args.pool_id)
         neutron_client.disassociate_health_monitor(pool_id,

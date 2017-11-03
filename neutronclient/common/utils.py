@@ -18,15 +18,20 @@
 """Utilities and helper functions."""
 
 import argparse
+import functools
+import hashlib
 import logging
+import netaddr
 import os
 
-from oslo.utils import encodeutils
-from oslo.utils import importutils
+from oslo_utils import encodeutils
+from oslo_utils import importutils
 import six
 
+from neutronclient._i18n import _
 from neutronclient.common import exceptions
-from neutronclient.i18n import _
+
+SENSITIVE_HEADERS = ('X-Auth-Token',)
 
 
 def env(*vars, **kwargs):
@@ -39,6 +44,14 @@ def env(*vars, **kwargs):
         if value:
             return value
     return kwargs.get('default', '')
+
+
+def convert_to_uppercase(string):
+    return string.upper()
+
+
+def convert_to_lowercase(string):
+    return string.lower()
 
 
 def get_client_class(api_name, version, version_map):
@@ -99,14 +112,51 @@ def str2bool(strbool):
     return strbool.lower() == 'true'
 
 
-def str2dict(strdict):
+def str2dict(strdict, required_keys=None, optional_keys=None):
     """Convert key1=value1,key2=value2,... string into dictionary.
 
-    :param strdict: key1=value1,key2=value2
+    :param strdict: string in the form of key1=value1,key2=value2
+    :param required_keys: list of required keys. All keys in this list must be
+                       specified. Otherwise ArgumentTypeError will be raised.
+                       If this parameter is unspecified, no required key check
+                       will be done.
+    :param optional_keys: list of optional keys.
+                       This parameter is used for valid key check.
+                       When at least one of required_keys and optional_keys,
+                       a key must be a member of either of required_keys or
+                       optional_keys. Otherwise, ArgumentTypeError will be
+                       raised. When both required_keys and optional_keys are
+                       unspecified, no valid key check will be done.
     """
-    if not strdict:
-        return {}
-    return dict([kv.split('=', 1) for kv in strdict.split(',')])
+    result = {}
+    if strdict:
+        for kv in strdict.split(','):
+            key, sep, value = kv.partition('=')
+            if not sep:
+                msg = _("invalid key-value '%s', expected format: key=value")
+                raise argparse.ArgumentTypeError(msg % kv)
+            result[key] = value
+    valid_keys = set(required_keys or []) | set(optional_keys or [])
+    if valid_keys:
+        invalid_keys = [k for k in result if k not in valid_keys]
+        if invalid_keys:
+            msg = _("Invalid key(s) '%(invalid_keys)s' specified. "
+                    "Valid key(s): '%(valid_keys)s'.")
+            raise argparse.ArgumentTypeError(
+                msg % {'invalid_keys': ', '.join(sorted(invalid_keys)),
+                       'valid_keys': ', '.join(sorted(valid_keys))})
+    if required_keys:
+        not_found_keys = [k for k in required_keys if k not in result]
+        if not_found_keys:
+            msg = _("Required key(s) '%s' not specified.")
+            raise argparse.ArgumentTypeError(msg % ', '.join(not_found_keys))
+    return result
+
+
+def str2dict_type(optional_keys=None, required_keys=None):
+    return functools.partial(str2dict,
+                             optional_keys=optional_keys,
+                             required_keys=required_keys)
 
 
 def http_log_req(_logger, args, kwargs):
@@ -120,20 +170,25 @@ def http_log_req(_logger, args, kwargs):
         else:
             string_parts.append(' %s' % element)
 
-    for element in kwargs['headers']:
-        header = ' -H "%s: %s"' % (element, kwargs['headers'][element])
+    for (key, value) in six.iteritems(kwargs['headers']):
+        if key in SENSITIVE_HEADERS:
+            v = value.encode('utf-8')
+            h = hashlib.sha1(v)
+            d = h.hexdigest()
+            value = "{SHA1}%s" % d
+        header = ' -H "%s: %s"' % (key, value)
         string_parts.append(header)
 
     if 'body' in kwargs and kwargs['body']:
         string_parts.append(" -d '%s'" % (kwargs['body']))
     req = encodeutils.safe_encode("".join(string_parts))
-    _logger.debug("\nREQ: %s\n", req)
+    _logger.debug("REQ: %s", req)
 
 
 def http_log_resp(_logger, resp, body):
     if not _logger.isEnabledFor(logging.DEBUG):
         return
-    _logger.debug("RESP:%(code)s %(headers)s %(body)s\n",
+    _logger.debug("RESP: %(code)s %(headers)s %(body)s",
                   {'code': resp.status_code,
                    'headers': resp.headers,
                    'body': body})
@@ -171,3 +226,11 @@ def add_boolean_argument(parser, name, **kwargs):
         choices=['True', 'true', 'False', 'false'],
         default=default,
         **kwargs)
+
+
+def is_valid_cidr(cidr):
+    try:
+        netaddr.IPNetwork(cidr)
+        return True
+    except Exception:
+        return False

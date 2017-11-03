@@ -18,98 +18,47 @@ from __future__ import print_function
 
 import abc
 import argparse
+import functools
 import logging
-import re
 
-from cliff.formatters import table
+from cliff import command
 from cliff import lister
 from cliff import show
-from oslo.serialization import jsonutils
+from oslo_serialization import jsonutils
 import six
 
-from neutronclient.common import command
+from neutronclient._i18n import _
 from neutronclient.common import exceptions
 from neutronclient.common import utils
-from neutronclient.i18n import _
 
-HEX_ELEM = '[0-9A-Fa-f]'
-UUID_PATTERN = '-'.join([HEX_ELEM + '{8}', HEX_ELEM + '{4}',
-                         HEX_ELEM + '{4}', HEX_ELEM + '{4}',
-                         HEX_ELEM + '{12}'])
+HYPHEN_OPTS = ['tags_any', 'not_tags', 'not_tags_any']
 
 
-def _get_resource_plural(resource, client):
-    plurals = getattr(client, 'EXTED_PLURALS', [])
-    for k in plurals:
-        if plurals[k] == resource:
-            return k
-    return resource + 's'
+def find_resource_by_id(client, resource, resource_id, cmd_resource=None,
+                        parent_id=None, fields=None):
+    return client.find_resource_by_id(resource, resource_id, cmd_resource,
+                                      parent_id, fields)
 
 
 def find_resourceid_by_id(client, resource, resource_id, cmd_resource=None,
                           parent_id=None):
-    if not cmd_resource:
-        cmd_resource = resource
-    cmd_resource_plural = _get_resource_plural(cmd_resource, client)
-    resource_plural = _get_resource_plural(resource, client)
-    obj_lister = getattr(client, "list_%s" % cmd_resource_plural)
-    # perform search by id only if we are passing a valid UUID
-    match = re.match(UUID_PATTERN, resource_id)
-    collection = resource_plural
-    if match:
-        if parent_id:
-            data = obj_lister(parent_id, id=resource_id, fields='id')
-        else:
-            data = obj_lister(id=resource_id, fields='id')
-        if data and data[collection]:
-            return data[collection][0]['id']
-    not_found_message = (_("Unable to find %(resource)s with id "
-                           "'%(id)s'") %
-                         {'resource': resource, 'id': resource_id})
-    # 404 is used to simulate server side behavior
-    raise exceptions.NeutronClientException(
-        message=not_found_message, status_code=404)
+    return find_resource_by_id(client, resource, resource_id, cmd_resource,
+                               parent_id, fields='id')['id']
 
 
-def _find_resourceid_by_name(client, resource, name, project_id=None,
-                             cmd_resource=None, parent_id=None):
-    if not cmd_resource:
-        cmd_resource = resource
-    cmd_resource_plural = _get_resource_plural(cmd_resource, client)
-    resource_plural = _get_resource_plural(resource, client)
-    obj_lister = getattr(client, "list_%s" % cmd_resource_plural)
-    params = {'name': name, 'fields': 'id'}
-    if project_id:
-        params['tenant_id'] = project_id
-    if parent_id:
-        data = obj_lister(parent_id, **params)
-    else:
-        data = obj_lister(**params)
-    collection = resource_plural
-    info = data[collection]
-    if len(info) > 1:
-        raise exceptions.NeutronClientNoUniqueMatch(resource=resource,
-                                                    name=name)
-    elif len(info) == 0:
-        not_found_message = (_("Unable to find %(resource)s with name "
-                               "'%(name)s'") %
-                             {'resource': resource, 'name': name})
-        # 404 is used to simulate server side behavior
-        raise exceptions.NeutronClientException(
-            message=not_found_message, status_code=404)
-    else:
-        return info[0]['id']
+def find_resource_by_name_or_id(client, resource, name_or_id,
+                                project_id=None, cmd_resource=None,
+                                parent_id=None, fields=None):
+    return client.find_resource(resource, name_or_id, project_id,
+                                cmd_resource, parent_id, fields)
 
 
 def find_resourceid_by_name_or_id(client, resource, name_or_id,
                                   project_id=None, cmd_resource=None,
                                   parent_id=None):
-    try:
-        return find_resourceid_by_id(client, resource, name_or_id,
-                                     cmd_resource, parent_id)
-    except exceptions.NeutronClientException:
-        return _find_resourceid_by_name(client, resource, name_or_id,
-                                        project_id, cmd_resource, parent_id)
+    return find_resource_by_name_or_id(client, resource, name_or_id,
+                                       project_id, cmd_resource,
+                                       parent_id, fields='id')['id']
 
 
 def add_show_list_common_argument(parser):
@@ -288,6 +237,10 @@ def parse_args_to_dict(values_specs):
                     _("Invalid values_specs %s") % ' '.join(values_specs))
             _value_number += 1
 
+        if _item.startswith('---'):
+            raise exceptions.CommandError(
+                _("Invalid values_specs %s") % ' '.join(values_specs))
+
         _values_specs.append(_item)
 
     # Deal with last one argument
@@ -328,7 +281,7 @@ def _merge_args(qCmd, parsed_args, _extra_values, value_specs):
                 if isinstance(arg_value, list):
                     if value and isinstance(value, list):
                         if (not arg_value or
-                                type(arg_value[0]) == type(value[0])):
+                                isinstance(arg_value[0], type(value[0]))):
                             arg_value.extend(value)
                             _extra_values.pop(key)
 
@@ -345,20 +298,7 @@ def update_dict(obj, dict, attributes):
             dict[attribute] = getattr(obj, attribute)
 
 
-class TableFormater(table.TableFormatter):
-    """This class is used to keep consistency with prettytable 0.6.
-
-    https://bugs.launchpad.net/python-neutronclient/+bug/1165962
-    """
-    def emit_list(self, column_names, data, stdout, parsed_args):
-        if column_names:
-            super(TableFormater, self).emit_list(column_names, data, stdout,
-                                                 parsed_args)
-        else:
-            stdout.write('\n')
-
-
-# command.OpenStackCommand is abstract class so that metaclass of
+# cliff.command.Command is abstract class so that metaclass of
 # subclass must be subclass of metaclass of all its base.
 # otherwise metaclass conflict exception is raised.
 class NeutronCommandMeta(abc.ABCMeta):
@@ -371,22 +311,17 @@ class NeutronCommandMeta(abc.ABCMeta):
 
 
 @six.add_metaclass(NeutronCommandMeta)
-class NeutronCommand(command.OpenStackCommand):
+class NeutronCommand(command.Command):
 
-    api = 'network'
     values_specs = []
     json_indent = None
     resource = None
     shadow_resource = None
     parent_id = None
 
-    def __init__(self, app, app_args):
-        super(NeutronCommand, self).__init__(app, app_args)
-        # NOTE(markmcclain): This is no longer supported in cliff version 1.5.2
-        # see https://bugs.launchpad.net/python-neutronclient/+bug/1265926
-
-        # if hasattr(self, 'formatters'):
-        #     self.formatters['table'] = TableFormater()
+    def run(self, parsed_args):
+        self.log.debug('run(%s)', parsed_args)
+        return super(NeutronCommand, self).run(parsed_args)
 
     @property
     def cmd_resource(self):
@@ -401,12 +336,12 @@ class NeutronCommand(command.OpenStackCommand):
         parser = super(NeutronCommand, self).get_parser(prog_name)
         parser.add_argument(
             '--request-format',
-            help=_('The XML or JSON request format.'),
+            help=_('DEPRECATED! Only JSON request format is supported.'),
             default='json',
-            choices=['json', 'xml', ], )
+            choices=['json', ], )
         parser.add_argument(
             '--request_format',
-            choices=['json', 'xml', ],
+            choices=['json', ],
             help=argparse.SUPPRESS)
 
         return parser
@@ -443,7 +378,6 @@ class NeutronCommand(command.OpenStackCommand):
 class CreateCommand(NeutronCommand, show.ShowOne):
     """Create a resource for a given tenant."""
 
-    api = 'network'
     log = None
 
     def get_parser(self, prog_name):
@@ -457,11 +391,9 @@ class CreateCommand(NeutronCommand, show.ShowOne):
         self.add_known_arguments(parser)
         return parser
 
-    def get_data(self, parsed_args):
-        self.log.debug('get_data(%s)' % parsed_args)
+    def take_action(self, parsed_args):
         self.set_extra_attrs(parsed_args)
         neutron_client = self.get_client()
-        neutron_client.format = parsed_args.request_format
         _extra_values = parse_args_to_dict(self.values_specs)
         _merge_args(self, parsed_args, _extra_values,
                     self.values_specs)
@@ -476,8 +408,9 @@ class CreateCommand(NeutronCommand, show.ShowOne):
         self.format_output_data(data)
         info = self.resource in data and data[self.resource] or None
         if info:
-            print(_('Created a new %s:') % self.resource,
-                  file=self.app.stdout)
+            if parsed_args.formatter == 'table':
+                print(_('Created a new %s:') % self.resource,
+                      file=self.app.stdout)
         else:
             info = {'': ''}
         return zip(*sorted(six.iteritems(info)))
@@ -486,9 +419,9 @@ class CreateCommand(NeutronCommand, show.ShowOne):
 class UpdateCommand(NeutronCommand):
     """Update resource's information."""
 
-    api = 'network'
     log = None
     allow_names = True
+    help_resource = None
 
     def get_parser(self, prog_name):
         parser = super(UpdateCommand, self).get_parser(prog_name)
@@ -496,17 +429,17 @@ class UpdateCommand(NeutronCommand):
             help_str = _('ID or name of %s to update.')
         else:
             help_str = _('ID of %s to update.')
+        if not self.help_resource:
+            self.help_resource = self.resource
         parser.add_argument(
             'id', metavar=self.resource.upper(),
-            help=help_str % self.resource)
+            help=help_str % self.help_resource)
         self.add_known_arguments(parser)
         return parser
 
-    def run(self, parsed_args):
-        self.log.debug('run(%s)', parsed_args)
+    def take_action(self, parsed_args):
         self.set_extra_attrs(parsed_args)
         neutron_client = self.get_client()
-        neutron_client.format = parsed_args.request_format
         _extra_values = parse_args_to_dict(self.values_specs)
         _merge_args(self, parsed_args, _extra_values,
                     self.values_specs)
@@ -542,60 +475,130 @@ class UpdateCommand(NeutronCommand):
 class DeleteCommand(NeutronCommand):
     """Delete a given resource."""
 
-    api = 'network'
     log = None
     allow_names = True
+    help_resource = None
+    bulk_delete = True
 
     def get_parser(self, prog_name):
         parser = super(DeleteCommand, self).get_parser(prog_name)
+        if not self.help_resource:
+            self.help_resource = self.resource
         if self.allow_names:
-            help_str = _('ID or name of %s to delete.')
+            help_str = _('ID(s) or name(s) of %s to delete.')
         else:
-            help_str = _('ID of %s to delete.')
+            help_str = _('ID(s) of %s to delete.')
         parser.add_argument(
             'id', metavar=self.resource.upper(),
-            help=help_str % self.resource)
+            nargs='+' if self.bulk_delete else 1,
+            help=help_str % self.help_resource)
         self.add_known_arguments(parser)
         return parser
 
-    def run(self, parsed_args):
-        self.log.debug('run(%s)', parsed_args)
+    def take_action(self, parsed_args):
         self.set_extra_attrs(parsed_args)
         neutron_client = self.get_client()
-        neutron_client.format = parsed_args.request_format
         obj_deleter = getattr(neutron_client,
                               "delete_%s" % self.cmd_resource)
+
+        if self.bulk_delete:
+            self._bulk_delete(obj_deleter, neutron_client, parsed_args.id)
+        else:
+            self.delete_item(obj_deleter, neutron_client, parsed_args.id)
+            print((_('Deleted %(resource)s: %(id)s')
+                   % {'id': parsed_args.id,
+                      'resource': self.resource}),
+                  file=self.app.stdout)
+        return
+
+    def _bulk_delete(self, obj_deleter, neutron_client, parsed_args_ids):
+        successful_delete = []
+        non_existent = []
+        multiple_ids = []
+        for item_id in parsed_args_ids:
+            try:
+                self.delete_item(obj_deleter, neutron_client, item_id)
+                successful_delete.append(item_id)
+            except exceptions.NotFound:
+                non_existent.append(item_id)
+            except exceptions.NeutronClientNoUniqueMatch:
+                multiple_ids.append(item_id)
+        if successful_delete:
+            print((_('Deleted %(resource)s(s): %(id)s'))
+                  % {'id': ", ".join(successful_delete),
+                     'resource': self.cmd_resource},
+                  file=self.app.stdout)
+        if non_existent:
+            print((_("Unable to find %(resource)s(s) with id(s) "
+                     "'%(id)s'") %
+                  {'resource': self.cmd_resource,
+                   'id': ", ".join(non_existent)}),
+                  file=self.app.stdout)
+        if multiple_ids:
+            print((_("Multiple %(resource)s(s) matches found for name(s)"
+                     " '%(id)s'. Please use an ID to be more specific.")) %
+                  {'resource': self.cmd_resource,
+                   'id': ", ".join(multiple_ids)},
+                  file=self.app.stdout)
+
+    def delete_item(self, obj_deleter, neutron_client, item_id):
         if self.allow_names:
             params = {'cmd_resource': self.cmd_resource,
                       'parent_id': self.parent_id}
             _id = find_resourceid_by_name_or_id(neutron_client,
                                                 self.resource,
-                                                parsed_args.id,
+                                                item_id,
                                                 **params)
         else:
-            _id = parsed_args.id
+            _id = item_id
 
         if self.parent_id:
             obj_deleter(_id, self.parent_id)
         else:
             obj_deleter(_id)
-        print((_('Deleted %(resource)s: %(id)s')
-               % {'id': parsed_args.id,
-                  'resource': self.resource}),
-              file=self.app.stdout)
         return
 
 
 class ListCommand(NeutronCommand, lister.Lister):
     """List resources that belong to a given tenant."""
 
-    api = 'network'
     log = None
     _formatters = {}
     list_columns = []
     unknown_parts_flag = True
     pagination_support = False
     sorting_support = False
+    resource_plural = None
+
+    # A list to define arguments for filtering by attribute value
+    # CLI arguments are shown in the order of this list.
+    # Each element must be either of a string of an attribute name
+    # or a dict of a full attribute definitions whose format is:
+    # {'name': attribute name, (mandatory)
+    #  'help': help message for CLI (mandatory)
+    #  'boolean': boolean parameter or not. (Default: False) (optional)
+    #  'argparse_kwargs': a dict of parameters passed to
+    #                     argparse add_argument()
+    #                     (Default: {}) (optional)
+    # }
+    # For more details, see ListNetworks.filter_attrs.
+    filter_attrs = []
+
+    default_attr_defs = {
+        'name': {
+            'help': _("Filter %s according to their name."),
+            'boolean': False,
+        },
+        'tenant_id': {
+            'help': _('Filter %s belonging to the given tenant.'),
+            'boolean': False,
+        },
+        'admin_state_up': {
+            'help': _('Filter and list the %s whose administrative '
+                      'state is active'),
+            'boolean': True,
+        },
+    }
 
     def get_parser(self, prog_name):
         parser = super(ListCommand, self).get_parser(prog_name)
@@ -605,7 +608,35 @@ class ListCommand(NeutronCommand, lister.Lister):
         if self.sorting_support:
             add_sorting_argument(parser)
         self.add_known_arguments(parser)
+        self.add_filtering_arguments(parser)
         return parser
+
+    def add_filtering_arguments(self, parser):
+        if not self.filter_attrs:
+            return
+
+        group_parser = parser.add_argument_group('filtering arguments')
+        collection = self.resource_plural or '%ss' % self.resource
+        for attr in self.filter_attrs:
+            if isinstance(attr, str):
+                # Use detail defined in default_attr_defs
+                attr_name = attr
+                attr_defs = self.default_attr_defs[attr]
+            else:
+                attr_name = attr['name']
+                attr_defs = attr
+            option_name = '--%s' % attr_name.replace('_', '-')
+            params = attr_defs.get('argparse_kwargs', {})
+            try:
+                help_msg = attr_defs['help'] % collection
+            except TypeError:
+                help_msg = attr_defs['help']
+            if attr_defs.get('boolean', False):
+                add_arg_func = functools.partial(utils.add_boolean_argument,
+                                                 group_parser)
+            else:
+                add_arg_func = group_parser.add_argument
+            add_arg_func(option_name, help=help_msg, **params)
 
     def args2search_opts(self, parsed_args):
         search_opts = {}
@@ -614,11 +645,18 @@ class ListCommand(NeutronCommand, lister.Lister):
             search_opts.update({'fields': fields})
         if parsed_args.show_details:
             search_opts.update({'verbose': 'True'})
+        filter_attrs = [field if isinstance(field, str) else field['name']
+                        for field in self.filter_attrs]
+        for attr in filter_attrs:
+            val = getattr(parsed_args, attr, None)
+            if attr in HYPHEN_OPTS:
+                attr = attr.replace('_', '-')
+            if val:
+                search_opts[attr] = val
         return search_opts
 
     def call_server(self, neutron_client, search_opts, parsed_args):
-        resource_plural = _get_resource_plural(self.cmd_resource,
-                                               neutron_client)
+        resource_plural = neutron_client.get_resource_plural(self.cmd_resource)
         obj_lister = getattr(neutron_client, "list_%s" % resource_plural)
         if self.parent_id:
             data = obj_lister(self.parent_id, **search_opts)
@@ -629,7 +667,6 @@ class ListCommand(NeutronCommand, lister.Lister):
     def retrieve_list(self, parsed_args):
         """Retrieve a list of resources from Neutron server."""
         neutron_client = self.get_client()
-        neutron_client.format = parsed_args.request_format
         _extra_values = parse_args_to_dict(self.values_specs)
         _merge_args(self, parsed_args, _extra_values,
                     self.values_specs)
@@ -652,15 +689,15 @@ class ListCommand(NeutronCommand, lister.Lister):
             if dirs:
                 search_opts.update({'sort_dir': dirs})
         data = self.call_server(neutron_client, search_opts, parsed_args)
-        collection = _get_resource_plural(self.resource, neutron_client)
+        collection = neutron_client.get_resource_plural(self.resource)
         return data.get(collection, [])
 
     def extend_list(self, data, parsed_args):
         """Update a retrieved list.
 
-        This method provides a way to modify a original list returned from
+        This method provides a way to modify an original list returned from
         the neutron server. For example, you can add subnet cidr information
-        to a list network.
+        to a network list.
         """
         pass
 
@@ -685,8 +722,7 @@ class ListCommand(NeutronCommand, lister.Lister):
             s, _columns, formatters=formatters, )
             for s in info), )
 
-    def get_data(self, parsed_args):
-        self.log.debug('get_data(%s)', parsed_args)
+    def take_action(self, parsed_args):
         self.set_extra_attrs(parsed_args)
         data = self.retrieve_list(parsed_args)
         self.extend_list(data, parsed_args)
@@ -696,9 +732,9 @@ class ListCommand(NeutronCommand, lister.Lister):
 class ShowCommand(NeutronCommand, show.ShowOne):
     """Show information of a given resource."""
 
-    api = 'network'
     log = None
     allow_names = True
+    help_resource = None
 
     def get_parser(self, prog_name):
         parser = super(ShowCommand, self).get_parser(prog_name)
@@ -707,17 +743,17 @@ class ShowCommand(NeutronCommand, show.ShowOne):
             help_str = _('ID or name of %s to look up.')
         else:
             help_str = _('ID of %s to look up.')
+        if not self.help_resource:
+            self.help_resource = self.resource
         parser.add_argument(
             'id', metavar=self.resource.upper(),
-            help=help_str % self.resource)
+            help=help_str % self.help_resource)
         self.add_known_arguments(parser)
         return parser
 
-    def get_data(self, parsed_args):
-        self.log.debug('get_data(%s)', parsed_args)
+    def take_action(self, parsed_args):
         self.set_extra_attrs(parsed_args)
         neutron_client = self.get_client()
-        neutron_client.format = parsed_args.request_format
 
         params = {}
         if parsed_args.show_details:

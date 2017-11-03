@@ -14,7 +14,7 @@
 #    under the License.
 #
 
-from neutronclient.i18n import _
+from neutronclient._i18n import _
 from neutronclient.neutron import v2_0 as neutronV20
 
 
@@ -42,7 +42,7 @@ class CreateVip(neutronV20.CreateCommand):
     def add_known_arguments(self, parser):
         parser.add_argument(
             'pool_id', metavar='POOL',
-            help=_('Pool ID or name this vip belongs to.'))
+            help=_('ID or name of the pool to which this vip belongs.'))
         parser.add_argument(
             '--address',
             help=_('IP address of the vip.'))
@@ -53,14 +53,15 @@ class CreateVip(neutronV20.CreateCommand):
         parser.add_argument(
             '--connection-limit',
             help=_('The maximum number of connections per second allowed for '
-                   'the vip. Positive integer or -1 for unlimited (default).'))
+                   'the vip. Valid values: a positive integer or -1 '
+                   'for unlimited (default).'))
         parser.add_argument(
             '--description',
-            help=_('Description of the vip.'))
+            help=_('Description of the vip to be created.'))
         parser.add_argument(
             '--name',
             required=True,
-            help=_('Name of the vip.'))
+            help=_('Name of the vip to be created.'))
         parser.add_argument(
             '--protocol-port',
             required=True,
@@ -81,18 +82,14 @@ class CreateVip(neutronV20.CreateCommand):
         _subnet_id = neutronV20.find_resourceid_by_name_or_id(
             self.get_client(), 'subnet', parsed_args.subnet_id)
 
-        body = {
-            self.resource: {
-                'pool_id': _pool_id,
+        body = {'pool_id': _pool_id,
                 'admin_state_up': parsed_args.admin_state,
-                'subnet_id': _subnet_id,
-            },
-        }
-        neutronV20.update_dict(parsed_args, body[self.resource],
+                'subnet_id': _subnet_id}
+        neutronV20.update_dict(parsed_args, body,
                                ['address', 'connection_limit', 'description',
                                 'name', 'protocol_port', 'protocol',
                                 'tenant_id'])
-        return body
+        return {self.resource: body}
 
 
 class UpdateVip(neutronV20.UpdateCommand):

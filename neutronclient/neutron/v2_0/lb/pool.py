@@ -17,7 +17,7 @@
 
 import six
 
-from neutronclient.i18n import _
+from neutronclient._i18n import _
 from neutronclient.neutron import v2_0 as neutronV20
 
 
@@ -77,21 +77,17 @@ class CreatePool(neutronV20.CreateCommand):
                    'located.'))
         parser.add_argument(
             '--provider',
-            help=_('Provider name of loadbalancer service.'))
+            help=_('Provider name of the loadbalancer service.'))
 
     def args2body(self, parsed_args):
         _subnet_id = neutronV20.find_resourceid_by_name_or_id(
             self.get_client(), 'subnet', parsed_args.subnet_id)
-        body = {
-            self.resource: {
-                'admin_state_up': parsed_args.admin_state,
-                'subnet_id': _subnet_id,
-            },
-        }
-        neutronV20.update_dict(parsed_args, body[self.resource],
+        body = {'admin_state_up': parsed_args.admin_state,
+                'subnet_id': _subnet_id}
+        neutronV20.update_dict(parsed_args, body,
                                ['description', 'lb_method', 'name',
                                 'protocol', 'tenant_id', 'provider'])
-        return body
+        return {self.resource: body}
 
 
 class UpdatePool(neutronV20.UpdateCommand):
@@ -111,10 +107,8 @@ class RetrievePoolStats(neutronV20.ShowCommand):
 
     resource = 'pool'
 
-    def get_data(self, parsed_args):
-        self.log.debug('run(%s)' % parsed_args)
+    def take_action(self, parsed_args):
         neutron_client = self.get_client()
-        neutron_client.format = parsed_args.request_format
         pool_id = neutronV20.find_resourceid_by_name_or_id(
             self.get_client(), 'pool', parsed_args.id)
         params = {}

@@ -18,12 +18,13 @@ from __future__ import print_function
 
 import argparse
 
-from oslo.serialization import jsonutils
+from oslo_serialization import jsonutils
 
+from neutronclient._i18n import _
 from neutronclient.common import exceptions
 from neutronclient.common import utils
-from neutronclient.i18n import _
 from neutronclient.neutron import v2_0 as neutronV20
+from neutronclient.neutron.v2_0 import availability_zone
 
 
 def _format_external_gateway_info(router):
@@ -66,7 +67,13 @@ class CreateRouter(neutronV20.CreateCommand):
             help=argparse.SUPPRESS)
         parser.add_argument(
             'name', metavar='NAME',
-            help=_('Name of router to create.'))
+            help=_('Name of the router to be created.'))
+        parser.add_argument(
+            '--description',
+            help=_('Description of router.'))
+        parser.add_argument(
+            '--flavor',
+            help=_('ID or name of flavor.'))
         utils.add_boolean_argument(
             parser, '--distributed', dest='distributed',
             help=_('Create a distributed router.'))
@@ -74,11 +81,19 @@ class CreateRouter(neutronV20.CreateCommand):
             parser, '--ha', dest='ha',
             help=_('Create a highly available router.'))
 
+        availability_zone.add_az_hint_argument(parser, self.resource)
+
     def args2body(self, parsed_args):
-        body = {self.resource: {'admin_state_up': parsed_args.admin_state}}
-        neutronV20.update_dict(parsed_args, body[self.resource],
-                               ['name', 'tenant_id', 'distributed', 'ha'])
-        return body
+        body = {'admin_state_up': parsed_args.admin_state}
+        if parsed_args.flavor:
+            _flavor_id = neutronV20.find_resourceid_by_name_or_id(
+                self.get_client(), 'flavor', parsed_args.flavor)
+            body['flavor_id'] = _flavor_id
+        neutronV20.update_dict(parsed_args, body,
+                               ['name', 'tenant_id', 'distributed', 'ha',
+                                'description'])
+        availability_zone.args2body_az_hint(parsed_args, body)
+        return {self.resource: body}
 
 
 class DeleteRouter(neutronV20.DeleteCommand):
@@ -92,11 +107,52 @@ class UpdateRouter(neutronV20.UpdateCommand):
 
     resource = 'router'
 
+    def add_known_arguments(self, parser):
+        parser.add_argument(
+            '--name',
+            help=_('Updated name of the router.'))
+        parser.add_argument(
+            '--description',
+            help=_('Description of router.'))
+        utils.add_boolean_argument(
+            parser, '--admin-state-up', dest='admin_state',
+            help=_('Specify the administrative state of the router '
+                   '(True means "Up").'))
+        utils.add_boolean_argument(
+            parser, '--admin_state_up', dest='admin_state',
+            help=argparse.SUPPRESS)
+        utils.add_boolean_argument(
+            parser, '--distributed', dest='distributed',
+            help=_('True means this router should operate in '
+                   'distributed mode.'))
+        routes_group = parser.add_mutually_exclusive_group()
+        routes_group.add_argument(
+            '--route', metavar='destination=CIDR,nexthop=IP_ADDR',
+            action='append', dest='routes',
+            type=utils.str2dict_type(required_keys=['destination', 'nexthop']),
+            help=_('Route to associate with the router.'
+                   ' You can repeat this option.'))
+        routes_group.add_argument(
+            '--no-routes',
+            action='store_true',
+            help=_('Remove routes associated with the router.'))
+
+    def args2body(self, parsed_args):
+        body = {}
+        if hasattr(parsed_args, 'admin_state'):
+            body['admin_state_up'] = parsed_args.admin_state
+        neutronV20.update_dict(parsed_args, body,
+                               ['name', 'distributed', 'description'])
+        if parsed_args.no_routes:
+            body['routes'] = None
+        elif parsed_args.routes:
+            body['routes'] = parsed_args.routes
+        return {self.resource: body}
+
 
 class RouterInterfaceCommand(neutronV20.NeutronCommand):
     """Based class to Add/Remove router interface."""
 
-    api = 'network'
     resource = 'router'
 
     def call_api(self, neutron_client, router_id, body):
@@ -119,10 +175,8 @@ class RouterInterfaceCommand(neutronV20.NeutronCommand):
                    'subnet.'))
         return parser
 
-    def run(self, parsed_args):
-        self.log.debug('run(%s)' % parsed_args)
+    def take_action(self, parsed_args):
         neutron_client = self.get_client()
-        neutron_client.format = parsed_args.request_format
 
         if '=' in parsed_args.interface:
             resource, value = parsed_args.interface.split('=', 1)
@@ -170,7 +224,6 @@ class RemoveInterfaceRouter(RouterInterfaceCommand):
 class SetGatewayRouter(neutronV20.NeutronCommand):
     """Set the external network gateway for a router."""
 
-    api = 'network'
     resource = 'router'
 
     def get_parser(self, prog_name):
@@ -182,21 +235,44 @@ class SetGatewayRouter(neutronV20.NeutronCommand):
             'external_network', metavar='EXTERNAL-NETWORK',
             help=_('ID or name of the external network for the gateway.'))
         parser.add_argument(
+            '--enable-snat', action='store_true',
+            help=_('Enable source NAT on the router gateway.'))
+        parser.add_argument(
             '--disable-snat', action='store_true',
             help=_('Disable source NAT on the router gateway.'))
+        parser.add_argument(
+            '--fixed-ip', metavar='subnet_id=SUBNET,ip_address=IP_ADDR',
+            action='append',
+            type=utils.str2dict_type(optional_keys=['subnet_id',
+                                                    'ip_address']),
+            help=_('Desired IP and/or subnet on external network: '
+                   'subnet_id=<name_or_id>,ip_address=<ip>. '
+                   'You can specify both of subnet_id and ip_address or '
+                   'specify one of them as well. '
+                   'You can repeat this option.'))
         return parser
 
-    def run(self, parsed_args):
-        self.log.debug('run(%s)' % parsed_args)
+    def take_action(self, parsed_args):
         neutron_client = self.get_client()
-        neutron_client.format = parsed_args.request_format
         _router_id = neutronV20.find_resourceid_by_name_or_id(
             neutron_client, self.resource, parsed_args.router)
         _ext_net_id = neutronV20.find_resourceid_by_name_or_id(
             neutron_client, 'network', parsed_args.external_network)
         router_dict = {'network_id': _ext_net_id}
+        if parsed_args.enable_snat:
+            router_dict['enable_snat'] = True
         if parsed_args.disable_snat:
             router_dict['enable_snat'] = False
+        if parsed_args.fixed_ip:
+            ips = []
+            for ip_spec in parsed_args.fixed_ip:
+                subnet_name_id = ip_spec.get('subnet_id')
+                if subnet_name_id:
+                    subnet_id = neutronV20.find_resourceid_by_name_or_id(
+                        neutron_client, 'subnet', subnet_name_id)
+                    ip_spec['subnet_id'] = subnet_id
+                ips.append(ip_spec)
+            router_dict['external_fixed_ips'] = ips
         neutron_client.add_gateway_router(_router_id, router_dict)
         print(_('Set gateway for router %s') % parsed_args.router,
               file=self.app.stdout)
@@ -205,7 +281,6 @@ class SetGatewayRouter(neutronV20.NeutronCommand):
 class RemoveGatewayRouter(neutronV20.NeutronCommand):
     """Remove an external network gateway from a router."""
 
-    api = 'network'
     resource = 'router'
 
     def get_parser(self, prog_name):
@@ -215,10 +290,8 @@ class RemoveGatewayRouter(neutronV20.NeutronCommand):
             help=_('ID or name of the router.'))
         return parser
 
-    def run(self, parsed_args):
-        self.log.debug('run(%s)' % parsed_args)
+    def take_action(self, parsed_args):
         neutron_client = self.get_client()
-        neutron_client.format = parsed_args.request_format
         _router_id = neutronV20.find_resourceid_by_name_or_id(
             neutron_client, self.resource, parsed_args.router)
         neutron_client.remove_gateway_router(_router_id)

@@ -16,28 +16,28 @@
 
 from __future__ import print_function
 
+import abc
 import argparse
 
 from cliff import lister
 from cliff import show
-from oslo.serialization import jsonutils
+from oslo_serialization import jsonutils
 import six
 
+from neutronclient._i18n import _
 from neutronclient.common import exceptions
 from neutronclient.common import utils
-from neutronclient.i18n import _
 from neutronclient.neutron import v2_0 as neutronV20
 
 
-def get_tenant_id(tenant_id, client):
-    return (tenant_id if tenant_id else
+def get_tenant_id(args, client):
+    return (args.pos_tenant_id or args.tenant_id or
             client.get_quotas_tenant()['tenant']['tenant_id'])
 
 
 class DeleteQuota(neutronV20.NeutronCommand):
     """Delete defined quotas of a given tenant."""
 
-    api = 'network'
     resource = 'quota'
 
     def get_parser(self, prog_name):
@@ -48,14 +48,14 @@ class DeleteQuota(neutronV20.NeutronCommand):
         parser.add_argument(
             '--tenant_id',
             help=argparse.SUPPRESS)
+        parser.add_argument(
+            'pos_tenant_id',
+            help=argparse.SUPPRESS, nargs='?')
         return parser
 
-    def run(self, parsed_args):
-        self.log.debug('run(%s)' % parsed_args)
+    def take_action(self, parsed_args):
         neutron_client = self.get_client()
-        neutron_client.format = parsed_args.request_format
-        tenant_id = get_tenant_id(parsed_args.tenant_id,
-                                  neutron_client)
+        tenant_id = get_tenant_id(parsed_args, neutron_client)
         obj_deleter = getattr(neutron_client,
                               "delete_%s" % self.resource)
         obj_deleter(tenant_id)
@@ -69,19 +69,16 @@ class DeleteQuota(neutronV20.NeutronCommand):
 class ListQuota(neutronV20.NeutronCommand, lister.Lister):
     """List quotas of all tenants who have non-default quota values."""
 
-    api = 'network'
     resource = 'quota'
 
     def get_parser(self, prog_name):
         parser = super(ListQuota, self).get_parser(prog_name)
         return parser
 
-    def get_data(self, parsed_args):
-        self.log.debug('get_data(%s)', parsed_args)
+    def take_action(self, parsed_args):
         neutron_client = self.get_client()
         search_opts = {}
         self.log.debug('search options: %s', search_opts)
-        neutron_client.format = parsed_args.request_format
         obj_lister = getattr(neutron_client,
                              "list_%ss" % self.resource)
         data = obj_lister(**search_opts)
@@ -94,50 +91,52 @@ class ListQuota(neutronV20.NeutronCommand, lister.Lister):
                 for s in info))
 
 
-class ShowQuota(neutronV20.NeutronCommand, show.ShowOne):
-    """Show quotas of a given tenant.
+class ShowQuotaBase(neutronV20.NeutronCommand, show.ShowOne):
+    """Base class to show quotas of a given tenant."""
 
-    """
-    api = 'network'
     resource = "quota"
 
+    @abc.abstractmethod
+    def retrieve_data(self, tenant_id, neutron_client):
+        """Retrieve data using neutron client for the given tenant."""
+
     def get_parser(self, prog_name):
-        parser = super(ShowQuota, self).get_parser(prog_name)
+        parser = super(ShowQuotaBase, self).get_parser(prog_name)
         parser.add_argument(
             '--tenant-id', metavar='tenant-id',
             help=_('The owner tenant ID.'))
         parser.add_argument(
             '--tenant_id',
             help=argparse.SUPPRESS)
+        # allow people to do neutron quota-show <tenant-id>.
+        # we use a different name for this because the default will
+        # override whatever is in the named arg otherwise.
+        parser.add_argument(
+            'pos_tenant_id',
+            help=argparse.SUPPRESS, nargs='?')
         return parser
 
-    def get_data(self, parsed_args):
-        self.log.debug('get_data(%s)', parsed_args)
+    def take_action(self, parsed_args):
         neutron_client = self.get_client()
-        neutron_client.format = parsed_args.request_format
-        tenant_id = get_tenant_id(parsed_args.tenant_id,
-                                  neutron_client)
-        params = {}
-        obj_shower = getattr(neutron_client,
-                             "show_%s" % self.resource)
-        data = obj_shower(tenant_id, **params)
+        tenant_id = get_tenant_id(parsed_args, neutron_client)
+        data = self.retrieve_data(tenant_id, neutron_client)
         if self.resource in data:
-            for k, v in six.iteritems(data[self.resource]):
-                if isinstance(v, list):
-                    value = ""
-                    for _item in v:
-                        if value:
-                            value += "\n"
-                        if isinstance(_item, dict):
-                            value += jsonutils.dumps(_item)
-                        else:
-                            value += str(_item)
-                    data[self.resource][k] = value
-                elif v is None:
-                    data[self.resource][k] = ''
             return zip(*sorted(six.iteritems(data[self.resource])))
-        else:
-            return None
+        return
+
+
+class ShowQuota(ShowQuotaBase):
+    """Show quotas for a given tenant."""
+
+    def retrieve_data(self, tenant_id, neutron_client):
+        return neutron_client.show_quota(tenant_id)
+
+
+class ShowQuotaDefault(ShowQuotaBase):
+    """Show default quotas for a given tenant."""
+
+    def retrieve_data(self, tenant_id, neutron_client):
+        return neutron_client.show_quota_default(tenant_id)
 
 
 class UpdateQuota(neutronV20.NeutronCommand, show.ShowOne):
@@ -186,6 +185,15 @@ class UpdateQuota(neutronV20.NeutronCommand, show.ShowOne):
         parser.add_argument(
             '--health-monitor', metavar='health_monitors',
             help=_('The limit of health monitors.'))
+        parser.add_argument(
+            '--loadbalancer', metavar='loadbalancers',
+            help=_('The limit of load balancers.'))
+        parser.add_argument(
+            '--listener', metavar='listeners',
+            help=_('The limit of listeners.'))
+        parser.add_argument(
+            'pos_tenant_id',
+            help=argparse.SUPPRESS, nargs='?')
 
         return parser
 
@@ -202,17 +210,20 @@ class UpdateQuota(neutronV20.NeutronCommand, show.ShowOne):
         quota = {}
         for resource in ('network', 'subnet', 'port', 'router', 'floatingip',
                          'security_group', 'security_group_rule',
-                         'vip', 'pool', 'member', 'health_monitor'):
+                         'vip', 'pool', 'member', 'health_monitor',
+                         'loadbalancer', 'listener'):
             if getattr(parsed_args, resource):
                 quota[resource] = self._validate_int(
                     resource,
                     getattr(parsed_args, resource))
+        if not quota:
+            raise exceptions.CommandError(
+                message=_('Must specify a valid resource with new quota '
+                          'value'))
         return {self.resource: quota}
 
-    def get_data(self, parsed_args):
-        self.log.debug('run(%s)', parsed_args)
+    def take_action(self, parsed_args):
         neutron_client = self.get_client()
-        neutron_client.format = parsed_args.request_format
         _extra_values = neutronV20.parse_args_to_dict(self.values_specs)
         neutronV20._merge_args(self, parsed_args, _extra_values,
                                self.values_specs)
@@ -223,8 +234,7 @@ class UpdateQuota(neutronV20.NeutronCommand, show.ShowOne):
             body[self.resource] = _extra_values
         obj_updator = getattr(neutron_client,
                               "update_%s" % self.resource)
-        tenant_id = get_tenant_id(parsed_args.tenant_id,
-                                  neutron_client)
+        tenant_id = get_tenant_id(parsed_args, neutron_client)
         data = obj_updator(tenant_id, body)
         if self.resource in data:
             for k, v in six.iteritems(data[self.resource]):
@@ -242,4 +252,4 @@ class UpdateQuota(neutronV20.NeutronCommand, show.ShowOne):
                     data[self.resource][k] = ''
             return zip(*sorted(six.iteritems(data[self.resource])))
         else:
-            return None
+            return

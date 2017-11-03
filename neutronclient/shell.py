@@ -21,34 +21,36 @@ Command-line interface to the Neutron APIs
 from __future__ import print_function
 
 import argparse
-import getpass
 import inspect
 import itertools
 import logging
 import os
 import sys
 
-from keystoneclient.auth.identity import v2 as v2_auth
-from keystoneclient.auth.identity import v3 as v3_auth
-from keystoneclient import discover
-from keystoneclient.openstack.common.apiclient import exceptions as ks_exc
-from keystoneclient import session
-from oslo.utils import encodeutils
-import six.moves.urllib.parse as urlparse
+from keystoneauth1 import session
+import os_client_config
+from oslo_utils import encodeutils
 
 from cliff import app
+from cliff import command
 from cliff import commandmanager
 
+from neutronclient._i18n import _
 from neutronclient.common import clientmanager
-from neutronclient.common import command as openstack_command
 from neutronclient.common import exceptions as exc
 from neutronclient.common import extension as client_extension
 from neutronclient.common import utils
-from neutronclient.i18n import _
+from neutronclient.neutron.v2_0 import address_scope
 from neutronclient.neutron.v2_0 import agent
 from neutronclient.neutron.v2_0 import agentscheduler
-from neutronclient.neutron.v2_0 import credential
+from neutronclient.neutron.v2_0 import auto_allocated_topology
+from neutronclient.neutron.v2_0 import availability_zone
+from neutronclient.neutron.v2_0.bgp import dragentscheduler as bgp_drsched
+from neutronclient.neutron.v2_0.bgp import peer as bgp_peer
+from neutronclient.neutron.v2_0.bgp import speaker as bgp_speaker
 from neutronclient.neutron.v2_0 import extension
+from neutronclient.neutron.v2_0.flavor import flavor
+from neutronclient.neutron.v2_0.flavor import flavor_profile
 from neutronclient.neutron.v2_0 import floatingip
 from neutronclient.neutron.v2_0.fw import firewall
 from neutronclient.neutron.v2_0.fw import firewallpolicy
@@ -57,26 +59,32 @@ from neutronclient.neutron.v2_0.lb import healthmonitor as lb_healthmonitor
 from neutronclient.neutron.v2_0.lb import member as lb_member
 from neutronclient.neutron.v2_0.lb import pool as lb_pool
 from neutronclient.neutron.v2_0.lb.v2 import healthmonitor as lbaas_healthmon
+from neutronclient.neutron.v2_0.lb.v2 import l7policy as lbaas_l7policy
+from neutronclient.neutron.v2_0.lb.v2 import l7rule as lbaas_l7rule
 from neutronclient.neutron.v2_0.lb.v2 import listener as lbaas_listener
 from neutronclient.neutron.v2_0.lb.v2 import loadbalancer as lbaas_loadbalancer
 from neutronclient.neutron.v2_0.lb.v2 import member as lbaas_member
 from neutronclient.neutron.v2_0.lb.v2 import pool as lbaas_pool
 from neutronclient.neutron.v2_0.lb import vip as lb_vip
 from neutronclient.neutron.v2_0 import metering
-from neutronclient.neutron.v2_0.nec import packetfilter
-from neutronclient.neutron.v2_0 import netpartition
 from neutronclient.neutron.v2_0 import network
-from neutronclient.neutron.v2_0 import networkprofile
-from neutronclient.neutron.v2_0.nsx import networkgateway
-from neutronclient.neutron.v2_0.nsx import qos_queue
-from neutronclient.neutron.v2_0 import policyprofile
+from neutronclient.neutron.v2_0 import network_ip_availability
 from neutronclient.neutron.v2_0 import port
+from neutronclient.neutron.v2_0 import purge
+from neutronclient.neutron.v2_0.qos import bandwidth_limit_rule
+from neutronclient.neutron.v2_0.qos import dscp_marking_rule
+from neutronclient.neutron.v2_0.qos import minimum_bandwidth_rule
+from neutronclient.neutron.v2_0.qos import policy as qos_policy
+from neutronclient.neutron.v2_0.qos import rule as qos_rule
 from neutronclient.neutron.v2_0 import quota
+from neutronclient.neutron.v2_0 import rbac
 from neutronclient.neutron.v2_0 import router
 from neutronclient.neutron.v2_0 import securitygroup
 from neutronclient.neutron.v2_0 import servicetype
 from neutronclient.neutron.v2_0 import subnet
 from neutronclient.neutron.v2_0 import subnetpool
+from neutronclient.neutron.v2_0 import tag
+from neutronclient.neutron.v2_0.vpn import endpoint_group
 from neutronclient.neutron.v2_0.vpn import ikepolicy
 from neutronclient.neutron.v2_0.vpn import ipsec_site_connection
 from neutronclient.neutron.v2_0.vpn import ipsecpolicy
@@ -97,8 +105,23 @@ def run_command(cmd, cmd_parser, sub_argv):
         _argv = sub_argv[:index]
         values_specs = sub_argv[index:]
     known_args, _values_specs = cmd_parser.parse_known_args(_argv)
+    if(isinstance(cmd, subnet.CreateSubnet) and not known_args.cidr):
+        cidr = get_first_valid_cidr(_values_specs)
+        if cidr:
+            known_args.cidr = cidr
+            _values_specs.remove(cidr)
     cmd.values_specs = (index == -1 and _values_specs or values_specs)
     return cmd.run(known_args)
+
+
+def get_first_valid_cidr(value_specs):
+    # Bug 1442771, argparse does not allow optional positional parameter
+    # to be separated from previous positional parameter.
+    # When cidr was separated from network, the value will not be able
+    # to be parsed into known_args, but saved to _values_specs instead.
+    for value in value_specs:
+        if utils.is_valid_cidr(value):
+            return value
 
 
 def env(*_vars, **kwargs):
@@ -126,9 +149,12 @@ def check_non_negative_int(value):
     return value
 
 
-class BashCompletionCommand(openstack_command.OpenStackCommand):
+class BashCompletionCommand(command.Command):
     """Prints all of the commands and options for bash-completion."""
-    resource = "bash_completion"
+
+    def take_action(self, parsed_args):
+        pass
+
 
 COMMAND_V2 = {
     'bash-completion': BashCompletionCommand,
@@ -153,8 +179,10 @@ COMMAND_V2 = {
     'port-create': port.CreatePort,
     'port-delete': port.DeletePort,
     'port-update': port.UpdatePort,
+    'purge': purge.Purge,
     'quota-list': quota.ListQuota,
     'quota-show': quota.ShowQuota,
+    'quota-default-show': quota.ShowQuotaDefault,
     'quota-delete': quota.DeleteQuota,
     'quota-update': quota.UpdateQuota,
     'ext-list': extension.ListExt,
@@ -189,11 +217,23 @@ COMMAND_V2 = {
     'lbaas-loadbalancer-create': lbaas_loadbalancer.CreateLoadBalancer,
     'lbaas-loadbalancer-update': lbaas_loadbalancer.UpdateLoadBalancer,
     'lbaas-loadbalancer-delete': lbaas_loadbalancer.DeleteLoadBalancer,
+    'lbaas-loadbalancer-stats': lbaas_loadbalancer.RetrieveLoadBalancerStats,
+    'lbaas-loadbalancer-status': lbaas_loadbalancer.RetrieveLoadBalancerStatus,
     'lbaas-listener-list': lbaas_listener.ListListener,
     'lbaas-listener-show': lbaas_listener.ShowListener,
     'lbaas-listener-create': lbaas_listener.CreateListener,
     'lbaas-listener-update': lbaas_listener.UpdateListener,
     'lbaas-listener-delete': lbaas_listener.DeleteListener,
+    'lbaas-l7policy-list': lbaas_l7policy.ListL7Policy,
+    'lbaas-l7policy-show': lbaas_l7policy.ShowL7Policy,
+    'lbaas-l7policy-create': lbaas_l7policy.CreateL7Policy,
+    'lbaas-l7policy-update': lbaas_l7policy.UpdateL7Policy,
+    'lbaas-l7policy-delete': lbaas_l7policy.DeleteL7Policy,
+    'lbaas-l7rule-list': lbaas_l7rule.ListL7Rule,
+    'lbaas-l7rule-show': lbaas_l7rule.ShowL7Rule,
+    'lbaas-l7rule-create': lbaas_l7rule.CreateL7Rule,
+    'lbaas-l7rule-update': lbaas_l7rule.UpdateL7Rule,
+    'lbaas-l7rule-delete': lbaas_l7rule.DeleteL7Rule,
     'lbaas-pool-list': lbaas_pool.ListPool,
     'lbaas-pool-show': lbaas_pool.ShowPool,
     'lbaas-pool-create': lbaas_pool.CreatePool,
@@ -234,26 +274,10 @@ COMMAND_V2 = {
     'lb-healthmonitor-disassociate': (
         lb_healthmonitor.DisassociateHealthMonitor
     ),
-    'queue-create': qos_queue.CreateQoSQueue,
-    'queue-delete': qos_queue.DeleteQoSQueue,
-    'queue-show': qos_queue.ShowQoSQueue,
-    'queue-list': qos_queue.ListQoSQueue,
     'agent-list': agent.ListAgent,
     'agent-show': agent.ShowAgent,
     'agent-delete': agent.DeleteAgent,
     'agent-update': agent.UpdateAgent,
-    'net-gateway-create': networkgateway.CreateNetworkGateway,
-    'net-gateway-update': networkgateway.UpdateNetworkGateway,
-    'net-gateway-delete': networkgateway.DeleteNetworkGateway,
-    'net-gateway-show': networkgateway.ShowNetworkGateway,
-    'net-gateway-list': networkgateway.ListNetworkGateway,
-    'net-gateway-connect': networkgateway.ConnectNetworkGateway,
-    'net-gateway-disconnect': networkgateway.DisconnectNetworkGateway,
-    'gateway-device-create': networkgateway.CreateGatewayDevice,
-    'gateway-device-update': networkgateway.UpdateGatewayDevice,
-    'gateway-device-delete': networkgateway.DeleteGatewayDevice,
-    'gateway-device-show': networkgateway.ShowGatewayDevice,
-    'gateway-device-list': networkgateway.ListGatewayDevice,
     'dhcp-agent-network-add': agentscheduler.AddNetworkToDhcpAgent,
     'dhcp-agent-network-remove': agentscheduler.RemoveNetworkFromDhcpAgent,
     'net-list-on-dhcp-agent': agentscheduler.ListNetworksOnDhcpAgent,
@@ -286,18 +310,6 @@ COMMAND_V2 = {
     'firewall-create': firewall.CreateFirewall,
     'firewall-update': firewall.UpdateFirewall,
     'firewall-delete': firewall.DeleteFirewall,
-    'cisco-credential-list': credential.ListCredential,
-    'cisco-credential-show': credential.ShowCredential,
-    'cisco-credential-create': credential.CreateCredential,
-    'cisco-credential-delete': credential.DeleteCredential,
-    'cisco-network-profile-list': networkprofile.ListNetworkProfile,
-    'cisco-network-profile-show': networkprofile.ShowNetworkProfile,
-    'cisco-network-profile-create': networkprofile.CreateNetworkProfile,
-    'cisco-network-profile-delete': networkprofile.DeleteNetworkProfile,
-    'cisco-network-profile-update': networkprofile.UpdateNetworkProfile,
-    'cisco-policy-profile-list': policyprofile.ListPolicyProfile,
-    'cisco-policy-profile-show': policyprofile.ShowPolicyProfile,
-    'cisco-policy-profile-update': policyprofile.UpdatePolicyProfile,
     'ipsec-site-connection-list': (
         ipsec_site_connection.ListIPsecSiteConnection
     ),
@@ -313,6 +325,11 @@ COMMAND_V2 = {
     'ipsec-site-connection-delete': (
         ipsec_site_connection.DeleteIPsecSiteConnection
     ),
+    'vpn-endpoint-group-list': endpoint_group.ListEndpointGroup,
+    'vpn-endpoint-group-show': endpoint_group.ShowEndpointGroup,
+    'vpn-endpoint-group-create': endpoint_group.CreateEndpointGroup,
+    'vpn-endpoint-group-update': endpoint_group.UpdateEndpointGroup,
+    'vpn-endpoint-group-delete': endpoint_group.DeleteEndpointGroup,
     'vpn-service-list': vpnservice.ListVPNService,
     'vpn-service-show': vpnservice.ShowVPNService,
     'vpn-service-create': vpnservice.CreateVPNService,
@@ -336,22 +353,127 @@ COMMAND_V2 = {
     'meter-label-rule-list': metering.ListMeteringLabelRule,
     'meter-label-rule-show': metering.ShowMeteringLabelRule,
     'meter-label-rule-delete': metering.DeleteMeteringLabelRule,
-    'nuage-netpartition-list': netpartition.ListNetPartition,
-    'nuage-netpartition-show': netpartition.ShowNetPartition,
-    'nuage-netpartition-create': netpartition.CreateNetPartition,
-    'nuage-netpartition-delete': netpartition.DeleteNetPartition,
-    'nec-packet-filter-list': packetfilter.ListPacketFilter,
-    'nec-packet-filter-show': packetfilter.ShowPacketFilter,
-    'nec-packet-filter-create': packetfilter.CreatePacketFilter,
-    'nec-packet-filter-update': packetfilter.UpdatePacketFilter,
-    'nec-packet-filter-delete': packetfilter.DeletePacketFilter,
+    'rbac-create': rbac.CreateRBACPolicy,
+    'rbac-update': rbac.UpdateRBACPolicy,
+    'rbac-list': rbac.ListRBACPolicy,
+    'rbac-show': rbac.ShowRBACPolicy,
+    'rbac-delete': rbac.DeleteRBACPolicy,
+    'address-scope-list': address_scope.ListAddressScope,
+    'address-scope-show': address_scope.ShowAddressScope,
+    'address-scope-create': address_scope.CreateAddressScope,
+    'address-scope-delete': address_scope.DeleteAddressScope,
+    'address-scope-update': address_scope.UpdateAddressScope,
+    'qos-policy-list': qos_policy.ListQoSPolicy,
+    'qos-policy-show': qos_policy.ShowQoSPolicy,
+    'qos-policy-create': qos_policy.CreateQoSPolicy,
+    'qos-policy-update': qos_policy.UpdateQoSPolicy,
+    'qos-policy-delete': qos_policy.DeleteQoSPolicy,
+    'qos-bandwidth-limit-rule-create': (
+        bandwidth_limit_rule.CreateQoSBandwidthLimitRule
+    ),
+    'qos-bandwidth-limit-rule-show': (
+        bandwidth_limit_rule.ShowQoSBandwidthLimitRule
+    ),
+    'qos-bandwidth-limit-rule-list': (
+        bandwidth_limit_rule.ListQoSBandwidthLimitRules
+    ),
+    'qos-bandwidth-limit-rule-update': (
+        bandwidth_limit_rule.UpdateQoSBandwidthLimitRule
+    ),
+    'qos-bandwidth-limit-rule-delete': (
+        bandwidth_limit_rule.DeleteQoSBandwidthLimitRule
+    ),
+    'qos-dscp-marking-rule-create': (
+        dscp_marking_rule.CreateQoSDscpMarkingRule
+    ),
+    'qos-dscp-marking-rule-show': (
+        dscp_marking_rule.ShowQoSDscpMarkingRule
+    ),
+    'qos-dscp-marking-rule-list': (
+        dscp_marking_rule.ListQoSDscpMarkingRules
+    ),
+    'qos-dscp-marking-rule-update': (
+        dscp_marking_rule.UpdateQoSDscpMarkingRule
+    ),
+    'qos-dscp-marking-rule-delete': (
+        dscp_marking_rule.DeleteQoSDscpMarkingRule
+    ),
+    'qos-minimum-bandwidth-rule-create': (
+        minimum_bandwidth_rule.CreateQoSMinimumBandwidthRule
+    ),
+    'qos-minimum-bandwidth-rule-show': (
+        minimum_bandwidth_rule.ShowQoSMinimumBandwidthRule
+    ),
+    'qos-minimum-bandwidth-rule-list': (
+        minimum_bandwidth_rule.ListQoSMinimumBandwidthRules
+    ),
+    'qos-minimum-bandwidth-rule-update': (
+        minimum_bandwidth_rule.UpdateQoSMinimumBandwidthRule
+    ),
+    'qos-minimum-bandwidth-rule-delete': (
+        minimum_bandwidth_rule.DeleteQoSMinimumBandwidthRule
+    ),
+    'qos-available-rule-types': qos_rule.ListQoSRuleTypes,
+    'flavor-list': flavor.ListFlavor,
+    'flavor-show': flavor.ShowFlavor,
+    'flavor-create': flavor.CreateFlavor,
+    'flavor-delete': flavor.DeleteFlavor,
+    'flavor-update': flavor.UpdateFlavor,
+    'flavor-associate': flavor.AssociateFlavor,
+    'flavor-disassociate': flavor.DisassociateFlavor,
+    'flavor-profile-list': flavor_profile.ListFlavorProfile,
+    'flavor-profile-show': flavor_profile.ShowFlavorProfile,
+    'flavor-profile-create': flavor_profile.CreateFlavorProfile,
+    'flavor-profile-delete': flavor_profile.DeleteFlavorProfile,
+    'flavor-profile-update': flavor_profile.UpdateFlavorProfile,
+    'availability-zone-list': availability_zone.ListAvailabilityZone,
+    'auto-allocated-topology-show': (
+        auto_allocated_topology.ShowAutoAllocatedTopology),
+    'auto-allocated-topology-delete': (
+        auto_allocated_topology.DeleteAutoAllocatedTopology),
+    'bgp-dragent-speaker-add': (
+        bgp_drsched.AddBGPSpeakerToDRAgent
+    ),
+    'bgp-dragent-speaker-remove': (
+        bgp_drsched.RemoveBGPSpeakerFromDRAgent
+    ),
+    'bgp-speaker-list-on-dragent': (
+        bgp_drsched.ListBGPSpeakersOnDRAgent
+    ),
+    'bgp-dragent-list-hosting-speaker': (
+        bgp_drsched.ListDRAgentsHostingBGPSpeaker
+    ),
+    'bgp-speaker-list': bgp_speaker.ListSpeakers,
+    'bgp-speaker-advertiseroute-list': (
+        bgp_speaker.ListRoutesAdvertisedBySpeaker
+    ),
+    'bgp-speaker-show': bgp_speaker.ShowSpeaker,
+    'bgp-speaker-create': bgp_speaker.CreateSpeaker,
+    'bgp-speaker-update': bgp_speaker.UpdateSpeaker,
+    'bgp-speaker-delete': bgp_speaker.DeleteSpeaker,
+    'bgp-speaker-peer-add': bgp_speaker.AddPeerToSpeaker,
+    'bgp-speaker-peer-remove': bgp_speaker.RemovePeerFromSpeaker,
+    'bgp-speaker-network-add': bgp_speaker.AddNetworkToSpeaker,
+    'bgp-speaker-network-remove': bgp_speaker.RemoveNetworkFromSpeaker,
+    'bgp-peer-list': bgp_peer.ListPeers,
+    'bgp-peer-show': bgp_peer.ShowPeer,
+    'bgp-peer-create': bgp_peer.CreatePeer,
+    'bgp-peer-update': bgp_peer.UpdatePeer,
+    'bgp-peer-delete': bgp_peer.DeletePeer,
+    'net-ip-availability-list': network_ip_availability.ListIpAvailability,
+    'net-ip-availability-show': network_ip_availability.ShowIpAvailability,
+    'tag-add': tag.AddTag,
+    'tag-replace': tag.ReplaceTag,
+    'tag-remove': tag.RemoveTag,
 }
 
 COMMANDS = {'2.0': COMMAND_V2}
 
 
 class HelpAction(argparse.Action):
-    """Provide a custom action so the -h and --help options
+    """Print help message including sub-commands
+
+    Provide a custom action so the -h and --help options
     to the main app will print a list of the commands.
 
     The commands are determined by checking the CommandManager
@@ -448,7 +570,7 @@ class NeutronShell(app.App):
             default=0,
             help=_("How many times the request to the Neutron server should "
                    "be retried if it fails."))
-        # FIXME(bklei): this method should come from python-keystoneclient
+        # FIXME(bklei): this method should come from keystoneauth1
         self._append_global_identity_args(parser)
 
         return parser
@@ -456,9 +578,9 @@ class NeutronShell(app.App):
     def _append_global_identity_args(self, parser):
         # FIXME(bklei): these are global identity (Keystone) arguments which
         # should be consistent and shared by all service clients. Therefore,
-        # they should be provided by python-keystoneclient. We will need to
+        # they should be provided by keystoneauth1. We will need to
         # refactor this code once this functionality is available in
-        # python-keystoneclient.
+        # keystoneauth1.
         #
         # Note: At that time we'll need to decide if we can just abandon
         #       the deprecated args (--service-type and --endpoint-type).
@@ -470,8 +592,8 @@ class NeutronShell(app.App):
 
         parser.add_argument(
             '--os-endpoint-type', metavar='<os-endpoint-type>',
-            default=env('OS_ENDPOINT_TYPE', default='publicURL'),
-            help=_('Defaults to env[OS_ENDPOINT_TYPE] or publicURL.'))
+            default=env('OS_ENDPOINT_TYPE', default='public'),
+            help=_('Defaults to env[OS_ENDPOINT_TYPE] or public.'))
 
         # FIXME(bklei): --service-type is deprecated but kept in for
         # backward compatibility.
@@ -484,7 +606,7 @@ class NeutronShell(app.App):
         # backward compatibility.
         parser.add_argument(
             '--endpoint-type', metavar='<endpoint-type>',
-            default=env('OS_ENDPOINT_TYPE', default='publicURL'),
+            default=env('OS_ENDPOINT_TYPE', default='public'),
             help=_('DEPRECATED! Use --os-endpoint-type.'))
 
         parser.add_argument(
@@ -497,8 +619,11 @@ class NeutronShell(app.App):
             help=argparse.SUPPRESS)
 
         parser.add_argument(
+            '--os-cloud', metavar='<cloud>',
+            help=_('Defaults to env[OS_CLOUD].'))
+
+        parser.add_argument(
             '--os-auth-url', metavar='<auth-url>',
-            default=env('OS_AUTH_URL'),
             help=_('Authentication URL, defaults to env[OS_AUTH_URL].'))
         parser.add_argument(
             '--os_auth_url',
@@ -507,17 +632,15 @@ class NeutronShell(app.App):
         project_name_group = parser.add_mutually_exclusive_group()
         project_name_group.add_argument(
             '--os-tenant-name', metavar='<auth-tenant-name>',
-            default=env('OS_TENANT_NAME'),
             help=_('Authentication tenant name, defaults to '
                    'env[OS_TENANT_NAME].'))
         project_name_group.add_argument(
             '--os-project-name',
             metavar='<auth-project-name>',
-            default=utils.env('OS_PROJECT_NAME'),
-            help='Another way to specify tenant name. '
-                 'This option is mutually exclusive with '
-                 ' --os-tenant-name. '
-                 'Defaults to env[OS_PROJECT_NAME].')
+            help=_('Another way to specify tenant name. '
+                   'This option is mutually exclusive with '
+                   ' --os-tenant-name. '
+                   'Defaults to env[OS_PROJECT_NAME].'))
 
         parser.add_argument(
             '--os_tenant_name',
@@ -526,21 +649,18 @@ class NeutronShell(app.App):
         project_id_group = parser.add_mutually_exclusive_group()
         project_id_group.add_argument(
             '--os-tenant-id', metavar='<auth-tenant-id>',
-            default=env('OS_TENANT_ID'),
             help=_('Authentication tenant ID, defaults to '
                    'env[OS_TENANT_ID].'))
         project_id_group.add_argument(
             '--os-project-id',
             metavar='<auth-project-id>',
-            default=utils.env('OS_PROJECT_ID'),
-            help='Another way to specify tenant ID. '
-            'This option is mutually exclusive with '
-            ' --os-tenant-id. '
-            'Defaults to env[OS_PROJECT_ID].')
+            help=_('Another way to specify tenant ID. '
+                   'This option is mutually exclusive with '
+                   ' --os-tenant-id. '
+                   'Defaults to env[OS_PROJECT_ID].'))
 
         parser.add_argument(
             '--os-username', metavar='<auth-username>',
-            default=utils.env('OS_USERNAME'),
             help=_('Authentication username, defaults to env[OS_USERNAME].'))
         parser.add_argument(
             '--os_username',
@@ -548,7 +668,6 @@ class NeutronShell(app.App):
 
         parser.add_argument(
             '--os-user-id', metavar='<auth-user-id>',
-            default=env('OS_USER_ID'),
             help=_('Authentication user ID (Env: OS_USER_ID)'))
 
         parser.add_argument(
@@ -558,9 +677,8 @@ class NeutronShell(app.App):
         parser.add_argument(
             '--os-user-domain-id',
             metavar='<auth-user-domain-id>',
-            default=utils.env('OS_USER_DOMAIN_ID'),
-            help='OpenStack user domain ID. '
-            'Defaults to env[OS_USER_DOMAIN_ID].')
+            help=_('OpenStack user domain ID. '
+                   'Defaults to env[OS_USER_DOMAIN_ID].'))
 
         parser.add_argument(
             '--os_user_domain_id',
@@ -569,9 +687,8 @@ class NeutronShell(app.App):
         parser.add_argument(
             '--os-user-domain-name',
             metavar='<auth-user-domain-name>',
-            default=utils.env('OS_USER_DOMAIN_NAME'),
-            help='OpenStack user domain name. '
-                 'Defaults to env[OS_USER_DOMAIN_NAME].')
+            help=_('OpenStack user domain name. '
+                   'Defaults to env[OS_USER_DOMAIN_NAME].'))
 
         parser.add_argument(
             '--os_user_domain_name',
@@ -588,19 +705,16 @@ class NeutronShell(app.App):
         parser.add_argument(
             '--os-project-domain-id',
             metavar='<auth-project-domain-id>',
-            default=utils.env('OS_PROJECT_DOMAIN_ID'),
-            help='Defaults to env[OS_PROJECT_DOMAIN_ID].')
+            help=_('Defaults to env[OS_PROJECT_DOMAIN_ID].'))
 
         parser.add_argument(
             '--os-project-domain-name',
             metavar='<auth-project-domain-name>',
-            default=utils.env('OS_PROJECT_DOMAIN_NAME'),
-            help='Defaults to env[OS_PROJECT_DOMAIN_NAME].')
+            help=_('Defaults to env[OS_PROJECT_DOMAIN_NAME].'))
 
         parser.add_argument(
             '--os-cert',
             metavar='<certificate>',
-            default=utils.env('OS_CERT'),
             help=_("Path of certificate file to use in SSL "
                    "connection. This file can optionally be "
                    "prepended with the private key. Defaults "
@@ -609,7 +723,6 @@ class NeutronShell(app.App):
         parser.add_argument(
             '--os-cacert',
             metavar='<ca-certificate>',
-            default=env('OS_CACERT', default=None),
             help=_("Specify a CA bundle file to use in "
                    "verifying a TLS (https) server certificate. "
                    "Defaults to env[OS_CACERT]."))
@@ -617,7 +730,6 @@ class NeutronShell(app.App):
         parser.add_argument(
             '--os-key',
             metavar='<key>',
-            default=utils.env('OS_KEY'),
             help=_("Path of client key to use in SSL "
                    "connection. This option is not necessary "
                    "if your key is prepended to your certificate "
@@ -625,7 +737,6 @@ class NeutronShell(app.App):
 
         parser.add_argument(
             '--os-password', metavar='<auth-password>',
-            default=utils.env('OS_PASSWORD'),
             help=_('Authentication password, defaults to env[OS_PASSWORD].'))
         parser.add_argument(
             '--os_password',
@@ -633,7 +744,6 @@ class NeutronShell(app.App):
 
         parser.add_argument(
             '--os-region-name', metavar='<auth-region-name>',
-            default=env('OS_REGION_NAME'),
             help=_('Authentication region name, defaults to '
                    'env[OS_REGION_NAME].'))
         parser.add_argument(
@@ -642,7 +752,6 @@ class NeutronShell(app.App):
 
         parser.add_argument(
             '--os-token', metavar='<token>',
-            default=env('OS_TOKEN'),
             help=_('Authentication token, defaults to env[OS_TOKEN].'))
         parser.add_argument(
             '--os_token',
@@ -656,7 +765,6 @@ class NeutronShell(app.App):
 
         parser.add_argument(
             '--os-url', metavar='<url>',
-            default=env('OS_URL'),
             help=_('Defaults to env[OS_URL].'))
         parser.add_argument(
             '--os_url',
@@ -677,9 +785,9 @@ class NeutronShell(app.App):
         options = set()
         for option, _action in self.parser._option_string_actions.items():
             options.add(option)
-        for command_name, command in self.command_manager:
-            commands.add(command_name)
-            cmd_factory = command.load()
+        for _name, _command in self.command_manager:
+            commands.add(_name)
+            cmd_factory = _command.load()
             cmd = cmd_factory(self, None)
             cmd_parser = cmd.get_parser('')
             for option, _action in cmd_parser._option_string_actions.items():
@@ -689,9 +797,9 @@ class NeutronShell(app.App):
     def _register_extensions(self, version):
         for name, module in itertools.chain(
                 client_extension._discover_via_entry_points()):
-            self._extend_shell_commands(module, version)
+            self._extend_shell_commands(name, module, version)
 
-    def _extend_shell_commands(self, module, version):
+    def _extend_shell_commands(self, name, module, version):
         classes = inspect.getmembers(module, inspect.isclass)
         for cls_name, cls in classes:
             if (issubclass(cls, client_extension.NeutronClientExtension) and
@@ -701,6 +809,9 @@ class NeutronShell(app.App):
                     if version not in cls.versions:
                         continue
                 try:
+                    name_prefix = "[%s]" % name
+                    cls.__doc__ = ("%s %s" % (name_prefix, cls.__doc__) if
+                                   cls.__doc__ else name_prefix)
                     self.command_manager.add_command(cmd, cls)
                     self.commands[version][cmd] = cls
                 except TypeError:
@@ -764,6 +875,10 @@ class NeutronShell(app.App):
                          )
             cmd_parser = cmd.get_parser(full_name)
             return run_command(cmd, cmd_parser, sub_argv)
+        except SystemExit:
+            print(_("Try 'neutron help %s' for more information.") %
+                  cmd_name, file=sys.stderr)
+            raise
         except Exception as e:
             if self.options.verbose_level >= self.DEBUG_LEVEL:
                 self.log.exception("%s", e)
@@ -772,108 +887,49 @@ class NeutronShell(app.App):
         return 1
 
     def authenticate_user(self):
-        """Make sure the user has provided all of the authentication
+        """Confirm user authentication
+
+        Make sure the user has provided all of the authentication
         info we need.
         """
-        if self.options.os_auth_strategy == 'keystone':
-            if self.options.os_token or self.options.os_url:
-                # Token flow auth takes priority
-                if not self.options.os_token:
-                    raise exc.CommandError(
-                        _("You must provide a token via"
-                          " either --os-token or env[OS_TOKEN]"
-                          " when providing a service URL"))
+        cloud_config = os_client_config.OpenStackConfig().get_one_cloud(
+            cloud=self.options.os_cloud, argparse=self.options,
+            network_api_version=self.api_version,
+            verify=not self.options.insecure)
+        verify, cert = cloud_config.get_requests_verify_args()
 
-                if not self.options.os_url:
-                    raise exc.CommandError(
-                        _("You must provide a service URL via"
-                          " either --os-url or env[OS_URL]"
-                          " when providing a token"))
+        # TODO(singhj): Remove dependancy on HTTPClient
+        # for the case of token-endpoint authentication
 
-            else:
-                # Validate password flow auth
-                project_info = (self.options.os_tenant_name or
-                                self.options.os_tenant_id or
-                                (self.options.os_project_name and
-                                    (self.options.os_project_domain_name or
-                                     self.options.os_project_domain_id)) or
-                                self.options.os_project_id)
-
-                if (not self.options.os_username
-                        and not self.options.os_user_id):
-                    raise exc.CommandError(
-                        _("You must provide a username or user ID via"
-                          "  --os-username, env[OS_USERNAME] or"
-                          "  --os-user-id, env[OS_USER_ID]"))
-
-                if not self.options.os_password:
-                    # No password, If we've got a tty, try prompting for it
-                    if hasattr(sys.stdin, 'isatty') and sys.stdin.isatty():
-                        # Check for Ctl-D
-                        try:
-                            self.options.os_password = getpass.getpass(
-                                'OS Password: ')
-                        except EOFError:
-                            pass
-                    # No password because we didn't have a tty or the
-                    # user Ctl-D when prompted.
-                    if not self.options.os_password:
-                        raise exc.CommandError(
-                            _("You must provide a password via"
-                              " either --os-password or env[OS_PASSWORD]"))
-
-                if (not project_info):
-                    # tenent is deprecated in Keystone v3. Use the latest
-                    # terminology instead.
-                    raise exc.CommandError(
-                        _("You must provide a project_id or project_name ("
-                          "with project_domain_name or project_domain_id) "
-                          "via "
-                          "  --os-project-id (env[OS_PROJECT_ID])"
-                          "  --os-project-name (env[OS_PROJECT_NAME]),"
-                          "  --os-project-domain-id "
-                          "(env[OS_PROJECT_DOMAIN_ID])"
-                          "  --os-project-domain-name "
-                          "(env[OS_PROJECT_DOMAIN_NAME])"))
-
-                if not self.options.os_auth_url:
-                    raise exc.CommandError(
-                        _("You must provide an auth url via"
-                          " either --os-auth-url or via env[OS_AUTH_URL]"))
-            auth_session = self._get_keystone_session()
-            auth = auth_session.auth
-        else:   # not keystone
-            if not self.options.os_url:
-                raise exc.CommandError(
-                    _("You must provide a service URL via"
-                      " either --os-url or env[OS_URL]"))
-            auth_session = None
+        # When using token-endpoint authentication legacy
+        # HTTPClient will be used, otherwise SessionClient
+        # will be used.
+        if self.options.os_token and self.options.os_url:
             auth = None
+            auth_session = None
+        else:
+            auth = cloud_config.get_auth()
 
+            auth_session = session.Session(
+                auth=auth, verify=verify, cert=cert,
+                timeout=self.options.http_timeout)
+
+        interface = self.options.os_endpoint_type or self.endpoint_type
+        if interface.endswith('URL'):
+            interface = interface[:-3]
         self.client_manager = clientmanager.ClientManager(
-            token=self.options.os_token,
-            url=self.options.os_url,
-            auth_url=self.options.os_auth_url,
-            tenant_name=self.options.os_tenant_name,
-            tenant_id=self.options.os_tenant_id,
-            username=self.options.os_username,
-            user_id=self.options.os_user_id,
-            password=self.options.os_password,
-            region_name=self.options.os_region_name,
-            api_version=self.api_version,
-            auth_strategy=self.options.os_auth_strategy,
-            # FIXME (bklei) honor deprecated service_type and
-            # endpoint type until they are removed
-            service_type=self.options.os_service_type or
-            self.options.service_type,
-            endpoint_type=self.options.os_endpoint_type or self.endpoint_type,
-            insecure=self.options.insecure,
-            ca_cert=self.options.os_cacert,
-            timeout=self.options.http_timeout,
             retries=self.options.retries,
             raise_errors=False,
             session=auth_session,
+            url=self.options.os_url,
+            token=self.options.os_token,
+            region_name=cloud_config.get_region_name(),
+            api_version=cloud_config.get_api_version('network'),
+            service_type=cloud_config.get_service_type('network'),
+            service_name=cloud_config.get_service_name('network'),
+            endpoint_type=interface,
             auth=auth,
+            insecure=not verify,
             log_credentials=True)
         return
 
@@ -927,96 +983,13 @@ class NeutronShell(app.App):
         root_logger.addHandler(console)
         return
 
-    def get_v2_auth(self, v2_auth_url):
-        return v2_auth.Password(
-            v2_auth_url,
-            username=self.options.os_username,
-            password=self.options.os_password,
-            tenant_id=self.options.os_tenant_id,
-            tenant_name=self.options.os_tenant_name)
-
-    def get_v3_auth(self, v3_auth_url):
-        project_id = self.options.os_project_id or self.options.os_tenant_id
-        project_name = (self.options.os_project_name or
-                        self.options.os_tenant_name)
-
-        return v3_auth.Password(
-            v3_auth_url,
-            username=self.options.os_username,
-            password=self.options.os_password,
-            user_id=self.options.os_user_id,
-            user_domain_name=self.options.os_user_domain_name,
-            user_domain_id=self.options.os_user_domain_id,
-            project_id=project_id,
-            project_name=project_name,
-            project_domain_name=self.options.os_project_domain_name,
-            project_domain_id=self.options.os_project_domain_id
-        )
-
-    def _discover_auth_versions(self, session, auth_url):
-        # discover the API versions the server is supporting base on the
-        # given URL
-        try:
-            ks_discover = discover.Discover(session=session, auth_url=auth_url)
-            return (ks_discover.url_for('2.0'), ks_discover.url_for('3.0'))
-        except ks_exc.ClientException:
-            # Identity service may not support discover API version.
-            # Lets try to figure out the API version from the original URL.
-            url_parts = urlparse.urlparse(auth_url)
-            (scheme, netloc, path, params, query, fragment) = url_parts
-            path = path.lower()
-            if path.startswith('/v3'):
-                return (None, auth_url)
-            elif path.startswith('/v2'):
-                return (auth_url, None)
-            else:
-                # not enough information to determine the auth version
-                msg = _('Unable to determine the Keystone version '
-                        'to authenticate with using the given '
-                        'auth_url. Identity service may not support API '
-                        'version discovery. Please provide a versioned '
-                        'auth_url instead.')
-                raise exc.CommandError(msg)
-
-    def _get_keystone_session(self):
-        # first create a Keystone session
-        cacert = self.options.os_cacert or None
-        cert = self.options.os_cert or None
-        key = self.options.os_key or None
-        insecure = self.options.insecure or False
-        ks_session = session.Session.construct(dict(cacert=cacert,
-                                                    cert=cert,
-                                                    key=key,
-                                                    insecure=insecure))
-        # discover the supported keystone versions using the given url
-        (v2_auth_url, v3_auth_url) = self._discover_auth_versions(
-            session=ks_session,
-            auth_url=self.options.os_auth_url)
-
-        # Determine which authentication plugin to use. First inspect the
-        # auth_url to see the supported version. If both v3 and v2 are
-        # supported, then use the highest version if possible.
-        user_domain_name = self.options.os_user_domain_name or None
-        user_domain_id = self.options.os_user_domain_id or None
-        project_domain_name = self.options.os_project_domain_name or None
-        project_domain_id = self.options.os_project_domain_id or None
-        domain_info = (user_domain_name or user_domain_id or
-                       project_domain_name or project_domain_id)
-
-        if (v2_auth_url and not domain_info) or not v3_auth_url:
-            ks_session.auth = self.get_v2_auth(v2_auth_url)
-        else:
-            ks_session.auth = self.get_v3_auth(v3_auth_url)
-
-        return ks_session
-
 
 def main(argv=sys.argv[1:]):
     try:
         return NeutronShell(NEUTRON_API_VERSION).run(
             list(map(encodeutils.safe_decode, argv)))
     except KeyboardInterrupt:
-        print("... terminating neutron client", file=sys.stderr)
+        print(_("... terminating neutron client"), file=sys.stderr)
         return 130
     except exc.NeutronClientException:
         return 1

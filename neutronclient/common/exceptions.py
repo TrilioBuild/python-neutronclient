@@ -13,7 +13,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from neutronclient.i18n import _
+from neutronclient._i18n import _
 
 """
 Neutron base exception handling.
@@ -60,10 +60,20 @@ class NeutronClientException(NeutronException):
     """
 
     status_code = 0
+    req_ids_msg = _("Neutron server returns request_ids: %s")
+    request_ids = []
 
     def __init__(self, message=None, **kwargs):
+        self.request_ids = kwargs.get('request_ids')
         if 'status_code' in kwargs:
             self.status_code = kwargs['status_code']
+        if self.request_ids:
+            req_ids_msg = self.req_ids_msg % self.request_ids
+            if message:
+                message = _('%(msg)s\n%(id)s') % {'msg': message,
+                                                  'id': req_ids_msg}
+            else:
+                message = req_ids_msg
         super(NeutronClientException, self).__init__(message, **kwargs)
 
 
@@ -144,13 +154,11 @@ class InvalidIpForNetworkClient(BadRequest):
     pass
 
 
-class OverQuotaClient(Conflict):
+class InvalidIpForSubnetClient(BadRequest):
     pass
 
 
-# TODO(amotoki): It is unused in Neutron, but it is referred to
-# in Horizon code. After Horizon code is updated, remove it.
-class AlreadyAttachedClient(Conflict):
+class OverQuotaClient(Conflict):
     pass
 
 
@@ -159,6 +167,10 @@ class IpAddressGenerationFailureClient(Conflict):
 
 
 class MacAddressInUseClient(Conflict):
+    pass
+
+
+class HostNotCompatibleWithFixedIpsClient(Conflict):
     pass
 
 
@@ -221,7 +233,9 @@ class CommandError(NeutronCLIError):
 
 
 class UnsupportedVersion(NeutronCLIError):
-    """Indicates that the user is trying to use an unsupported version of
+    """Indicates usage of an unsupported API version
+
+    Indicates that the user is trying to use an unsupported version of
     the API.
     """
     pass

@@ -16,10 +16,13 @@
 
 import argparse
 
+from neutronclient._i18n import _
 from neutronclient.common import exceptions
 from neutronclient.common import utils
-from neutronclient.i18n import _
 from neutronclient.neutron import v2_0 as neutronV20
+from neutronclient.neutron.v2_0 import availability_zone
+from neutronclient.neutron.v2_0 import dns
+from neutronclient.neutron.v2_0.qos import policy as qos_policy
 
 
 def _format_subnets(network):
@@ -28,6 +31,11 @@ def _format_subnets(network):
                           for s in network['subnets']])
     except (TypeError, KeyError):
         return ''
+
+
+def args2body_common(body, parsed_args):
+    neutronV20.update_dict(parsed_args, body,
+                           ['name', 'description'])
 
 
 class ListNetwork(neutronV20.ListCommand):
@@ -41,6 +49,44 @@ class ListNetwork(neutronV20.ListCommand):
     list_columns = ['id', 'name', 'subnets']
     pagination_support = True
     sorting_support = True
+
+    filter_attrs = [
+        'tenant_id',
+        'name',
+        'admin_state_up',
+        {'name': 'status',
+         'help': _("Filter %s according to their operation status."
+                   "(For example: ACTIVE, ERROR etc)"),
+         'boolean': False,
+         'argparse_kwargs': {'type': utils.convert_to_uppercase}},
+        {'name': 'shared',
+         'help': _('Filter and list the networks which are shared.'),
+         'boolean': True},
+        {'name': 'router:external',
+         'help': _('Filter and list the networks which are external.'),
+         'boolean': True},
+        {'name': 'tags',
+         'help': _("Filter and list %s which has all given tags. "
+                   "Multiple tags can be set like --tags <tag[,tag...]>"),
+         'boolean': False,
+         'argparse_kwargs': {'metavar': 'TAG'}},
+        {'name': 'tags_any',
+         'help': _("Filter and list %s which has any given tags. "
+                   "Multiple tags can be set like --tags-any <tag[,tag...]>"),
+         'boolean': False,
+         'argparse_kwargs': {'metavar': 'TAG'}},
+        {'name': 'not_tags',
+         'help': _("Filter and list %s which does not have all given tags. "
+                   "Multiple tags can be set like --not-tags <tag[,tag...]>"),
+         'boolean': False,
+         'argparse_kwargs': {'metavar': 'TAG'}},
+        {'name': 'not_tags_any',
+         'help': _("Filter and list %s which does not have any given tags. "
+                   "Multiple tags can be set like --not-tags-any "
+                   "<tag[,tag...]>"),
+         'boolean': False,
+         'argparse_kwargs': {'metavar': 'TAG'}},
+    ]
 
     def extend_list(self, data, parsed_args):
         """Add subnet information to a network list."""
@@ -101,7 +147,7 @@ class ShowNetwork(neutronV20.ShowCommand):
     resource = 'network'
 
 
-class CreateNetwork(neutronV20.CreateCommand):
+class CreateNetwork(neutronV20.CreateCommand, qos_policy.CreateQosPolicyMixin):
     """Create a network for a given tenant."""
 
     resource = 'network'
@@ -121,11 +167,6 @@ class CreateNetwork(neutronV20.CreateCommand):
             help=_('Set the network as shared.'),
             default=argparse.SUPPRESS)
         parser.add_argument(
-            '--router:external',
-            action='store_true',
-            help=_('Set network as external, it is only available for admin'),
-            default=argparse.SUPPRESS)
-        parser.add_argument(
             '--provider:network_type',
             metavar='<network_type>',
             help=_('The physical mechanism by which the virtual network'
@@ -133,33 +174,43 @@ class CreateNetwork(neutronV20.CreateCommand):
         parser.add_argument(
             '--provider:physical_network',
             metavar='<physical_network_name>',
-            help=_('Name of the physical network over which the virtual'
-                   ' network is implemented.'))
+            help=_('Name of the physical network over which the virtual '
+                   'network is implemented.'))
         parser.add_argument(
             '--provider:segmentation_id',
             metavar='<segmentation_id>',
-            help=_('VLAN ID for VLAN networks or tunnel-id for GRE/VXLAN'
-                   ' networks.'))
+            help=_('VLAN ID for VLAN networks or tunnel-id for GRE/VXLAN '
+                   'networks.'))
         utils.add_boolean_argument(
             parser,
             '--vlan-transparent',
             default=argparse.SUPPRESS,
-            help=_('Create a vlan transparent network.'))
+            help=_('Create a VLAN transparent network.'))
         parser.add_argument(
             'name', metavar='NAME',
-            help=_('Name of network to create.'))
+            help=_('Name of the network to be created.'))
+        parser.add_argument(
+            '--description',
+            help=_('Description of network.'))
+
+        self.add_arguments_qos_policy(parser)
+        availability_zone.add_az_hint_argument(parser, self.resource)
+        dns.add_dns_argument_create(parser, self.resource, 'domain')
 
     def args2body(self, parsed_args):
-        body = {'network': {
-            'name': parsed_args.name,
-            'admin_state_up': parsed_args.admin_state}, }
-        neutronV20.update_dict(parsed_args, body['network'],
-                               ['shared', 'tenant_id', 'router:external',
+        body = {'admin_state_up': parsed_args.admin_state}
+        args2body_common(body, parsed_args)
+        neutronV20.update_dict(parsed_args, body,
+                               ['shared', 'tenant_id',
                                 'vlan_transparent',
                                 'provider:network_type',
                                 'provider:physical_network',
-                                'provider:segmentation_id'])
-        return body
+                                'provider:segmentation_id',
+                                'description'])
+        self.args2body_qos_policy(parsed_args, body)
+        availability_zone.args2body_az_hint(parsed_args, body)
+        dns.args2body_dns_create(parsed_args, body, 'domain')
+        return {'network': body}
 
 
 class DeleteNetwork(neutronV20.DeleteCommand):
@@ -168,7 +219,24 @@ class DeleteNetwork(neutronV20.DeleteCommand):
     resource = 'network'
 
 
-class UpdateNetwork(neutronV20.UpdateCommand):
+class UpdateNetwork(neutronV20.UpdateCommand, qos_policy.UpdateQosPolicyMixin):
     """Update network's information."""
 
     resource = 'network'
+
+    def add_known_arguments(self, parser):
+        parser.add_argument(
+            '--name',
+            help=_('Name of the network.'))
+        parser.add_argument(
+            '--description',
+            help=_('Description of this network.'))
+        self.add_arguments_qos_policy(parser)
+        dns.add_dns_argument_update(parser, self.resource, 'domain')
+
+    def args2body(self, parsed_args):
+        body = {}
+        args2body_common(body, parsed_args)
+        self.args2body_qos_policy(parsed_args, body)
+        dns.args2body_dns_update(parsed_args, body, 'domain')
+        return {'network': body}

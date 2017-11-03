@@ -14,10 +14,61 @@
 #    under the License.
 #
 
+import argparse
+
+from neutronclient._i18n import _
 from neutronclient.common import utils
-from neutronclient.i18n import _
 from neutronclient.neutron import v2_0 as neutronv20
 from neutronclient.neutron.v2_0.vpn import utils as vpn_utils
+
+
+def add_common_args(parser, is_create=True):
+    parser.add_argument(
+        '--description',
+        help=_('Description of the IKE policy.'))
+    parser.add_argument(
+        '--auth-algorithm',
+        type=utils.convert_to_lowercase,
+        default='sha1' if is_create else argparse.SUPPRESS,
+        help=_('Authentication algorithm, default:sha1.'))
+    parser.add_argument(
+        '--encryption-algorithm',
+        default='aes-128' if is_create else argparse.SUPPRESS,
+        type=utils.convert_to_lowercase,
+        help=_('Encryption algorithm, default:aes-128.'))
+    parser.add_argument(
+        '--phase1-negotiation-mode',
+        default='main' if is_create else argparse.SUPPRESS,
+        choices=['main'],
+        type=utils.convert_to_lowercase,
+        help=_('IKE Phase1 negotiation mode, default:main.'))
+    parser.add_argument(
+        '--ike-version',
+        default='v1' if is_create else argparse.SUPPRESS,
+        choices=['v1', 'v2'],
+        type=utils.convert_to_lowercase,
+        help=_('IKE version for the policy, default:v1.'))
+    parser.add_argument(
+        '--pfs',
+        default='group5' if is_create else argparse.SUPPRESS,
+        type=utils.convert_to_lowercase,
+        help=_('Perfect Forward Secrecy, default:group5.'))
+    parser.add_argument(
+        '--lifetime',
+        metavar="units=UNITS,value=VALUE",
+        type=utils.str2dict_type(optional_keys=['units', 'value']),
+        help=vpn_utils.lifetime_help("IKE"))
+
+
+def parse_common_args2body(parsed_args, body):
+    neutronv20.update_dict(parsed_args, body,
+                           ['auth_algorithm', 'encryption_algorithm',
+                            'phase1_negotiation_mode', 'ike_version',
+                            'pfs', 'name', 'description', 'tenant_id'])
+    if parsed_args.lifetime:
+        vpn_utils.validate_lifetime_dict(parsed_args.lifetime)
+        body['lifetime'] = parsed_args.lifetime
+    return body
 
 
 class ListIKEPolicy(neutronv20.ListCommand):
@@ -35,6 +86,7 @@ class ShowIKEPolicy(neutronv20.ShowCommand):
     """Show information of a given IKE policy."""
 
     resource = 'ikepolicy'
+    help_resource = 'IKE policy'
 
 
 class CreateIKEPolicy(neutronv20.CreateCommand):
@@ -44,82 +96,32 @@ class CreateIKEPolicy(neutronv20.CreateCommand):
 
     def add_known_arguments(self, parser):
         parser.add_argument(
-            '--description',
-            help=_('Description of the IKE policy'))
-        parser.add_argument(
-            '--auth-algorithm',
-            default='sha1', choices=['sha1'],
-            help=_('Authentication algorithm in lowercase. '
-                   'Default:sha1'))
-        parser.add_argument(
-            '--encryption-algorithm',
-            default='aes-128',
-            help=_('Encryption algorithm in lowercase, default:aes-128'))
-        parser.add_argument(
-            '--phase1-negotiation-mode',
-            default='main', choices=['main'],
-            help=_('IKE Phase1 negotiation mode in lowercase, default:main'))
-        parser.add_argument(
-            '--ike-version',
-            default='v1', choices=['v1', 'v2'],
-            help=_('IKE version in lowercase, default:v1'))
-        parser.add_argument(
-            '--pfs',
-            default='group5', choices=['group2', 'group5', 'group14'],
-            help=_('Perfect Forward Secrecy in lowercase, default:group5'))
-        parser.add_argument(
-            '--lifetime',
-            metavar="units=UNITS,value=VALUE",
-            type=utils.str2dict,
-            help=vpn_utils.lifetime_help("IKE"))
-        parser.add_argument(
             'name', metavar='NAME',
             help=_('Name of the IKE policy.'))
+        add_common_args(parser)
 
     def args2body(self, parsed_args):
-
-        body = {'ikepolicy': {
-            'auth_algorithm': parsed_args.auth_algorithm,
-            'encryption_algorithm': parsed_args.encryption_algorithm,
-            'phase1_negotiation_mode': parsed_args.phase1_negotiation_mode,
-            'ike_version': parsed_args.ike_version,
-            'pfs': parsed_args.pfs,
-        }, }
-        if parsed_args.name:
-            body['ikepolicy'].update({'name': parsed_args.name})
-        if parsed_args.description:
-            body['ikepolicy'].update({'description': parsed_args.description})
-        if parsed_args.tenant_id:
-            body['ikepolicy'].update({'tenant_id': parsed_args.tenant_id})
-        if parsed_args.lifetime:
-            vpn_utils.validate_lifetime_dict(parsed_args.lifetime)
-            body['ikepolicy'].update({'lifetime': parsed_args.lifetime})
-        return body
+        return {'ikepolicy': parse_common_args2body(parsed_args, body={})}
 
 
 class UpdateIKEPolicy(neutronv20.UpdateCommand):
     """Update a given IKE policy."""
 
     resource = 'ikepolicy'
+    help_resource = 'IKE policy'
 
     def add_known_arguments(self, parser):
         parser.add_argument(
-            '--lifetime',
-            metavar="units=UNITS,value=VALUE",
-            type=utils.str2dict,
-            help=vpn_utils.lifetime_help("IKE"))
+            '--name',
+            help=_('Updated name of the IKE policy.'))
+        add_common_args(parser, is_create=False)
 
     def args2body(self, parsed_args):
-
-        body = {'ikepolicy': {
-        }, }
-        if parsed_args.lifetime:
-            vpn_utils.validate_lifetime_dict(parsed_args.lifetime)
-            body['ikepolicy'].update({'lifetime': parsed_args.lifetime})
-        return body
+        return {'ikepolicy': parse_common_args2body(parsed_args, body={})}
 
 
 class DeleteIKEPolicy(neutronv20.DeleteCommand):
     """Delete a given IKE policy."""
 
     resource = 'ikepolicy'
+    help_resource = 'IKE policy'

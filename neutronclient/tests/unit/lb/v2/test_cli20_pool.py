@@ -16,14 +16,15 @@
 
 import sys
 
+from neutronclient.common import exceptions
 from neutronclient.neutron.v2_0.lb.v2 import pool
 from neutronclient.tests.unit import test_cli20
 
 
 class CLITestV20LbPoolJSON(test_cli20.CLITestV20Base):
 
-    def test_create_pool_with_mandatory_params(self):
-        """lbaas-pool-create with mandatory params only."""
+    def test_create_pool_with_listener(self):
+        # lbaas-pool-create with listener
         resource = 'pool'
         cmd_resource = 'lbaas_pool'
         cmd = pool.CreatePool(test_cli20.MyApp(sys.stdout), None)
@@ -40,14 +41,50 @@ class CLITestV20LbPoolJSON(test_cli20.CLITestV20Base):
                                    position_names, position_values,
                                    cmd_resource=cmd_resource)
 
+    def test_create_pool_with_loadbalancer_no_listener(self):
+        """lbaas-pool-create with loadbalancer, no listener."""
+        resource = 'pool'
+        cmd_resource = 'lbaas_pool'
+        cmd = pool.CreatePool(test_cli20.MyApp(sys.stdout), None)
+        my_id = 'my-id'
+        lb_algorithm = 'ROUND_ROBIN'
+        loadbalancer = 'loadbalancer'
+        protocol = 'TCP'
+        args = ['--lb-algorithm', lb_algorithm, '--protocol', protocol,
+                '--loadbalancer', loadbalancer]
+        position_names = ['admin_state_up', 'lb_algorithm', 'protocol',
+                          'loadbalancer_id']
+        position_values = [True, lb_algorithm, protocol, loadbalancer]
+        self._test_create_resource(resource, cmd, '', my_id, args,
+                                   position_names, position_values,
+                                   cmd_resource=cmd_resource)
+
+    def test_create_pool_with_no_listener_or_loadbalancer(self):
+        """lbaas-pool-create with no listener or loadbalancer."""
+        resource = 'pool'
+        cmd_resource = 'lbaas_pool'
+        cmd = pool.CreatePool(test_cli20.MyApp(sys.stdout), None)
+        my_id = 'my-id'
+        lb_algorithm = 'ROUND_ROBIN'
+        protocol = 'TCP'
+        args = ['--lb-algorithm', lb_algorithm, '--protocol', protocol]
+        position_names = ['admin_state_up', 'lb_algorithm', 'protocol']
+        position_values = [True, lb_algorithm, protocol]
+        self._test_create_resource(resource, cmd, '', my_id, args,
+                                   position_names, position_values,
+                                   cmd_resource=cmd_resource,
+                                   no_api_call=True,
+                                   expected_exception=exceptions.CommandError)
+
     def test_create_pool_with_all_params(self):
-        """lbaas-pool-create with all params set."""
+        # lbaas-pool-create with all params set.
         resource = 'pool'
         cmd_resource = 'lbaas_pool'
         cmd = pool.CreatePool(test_cli20.MyApp(sys.stdout), None)
         my_id = 'my-id'
         lb_algorithm = 'ROUND_ROBIN'
         listener = 'listener'
+        loadbalancer = 'loadbalancer'
         protocol = 'TCP'
         description = 'description'
         session_persistence_str = 'type=APP_COOKIE,cookie_name=1234'
@@ -57,18 +94,19 @@ class CLITestV20LbPoolJSON(test_cli20.CLITestV20Base):
         args = ['--lb-algorithm', lb_algorithm, '--protocol', protocol,
                 '--description', description, '--session-persistence',
                 session_persistence_str, '--admin-state-down', '--name', name,
-                '--listener', listener]
+                '--listener', listener, '--loadbalancer', loadbalancer]
         position_names = ['lb_algorithm', 'protocol', 'description',
                           'session_persistence', 'admin_state_up', 'name',
-                          'listener_id']
+                          'listener_id', 'loadbalancer_id']
         position_values = [lb_algorithm, protocol, description,
-                           session_persistence, False, name, listener]
+                           session_persistence, False, name, listener,
+                           loadbalancer]
         self._test_create_resource(resource, cmd, '', my_id, args,
                                    position_names, position_values,
                                    cmd_resource=cmd_resource)
 
     def test_list_pools(self):
-        """lbaas-pool-list."""
+        # lbaas-pool-list.
         resources = 'pools'
         cmd_resources = 'lbaas_pools'
         cmd = pool.ListPool(test_cli20.MyApp(sys.stdout), None)
@@ -76,7 +114,7 @@ class CLITestV20LbPoolJSON(test_cli20.CLITestV20Base):
                                   cmd_resources=cmd_resources)
 
     def test_list_pools_pagination(self):
-        """lbaas-pool-list with pagination."""
+        # lbaas-pool-list with pagination.
         resources = 'pools'
         cmd_resources = 'lbaas_pools'
         cmd = pool.ListPool(test_cli20.MyApp(sys.stdout), None)
@@ -84,7 +122,7 @@ class CLITestV20LbPoolJSON(test_cli20.CLITestV20Base):
                                                   cmd_resources=cmd_resources)
 
     def test_list_pools_sort(self):
-        """lbaas-pool-list --sort-key id --sort-key asc."""
+        # lbaas-pool-list --sort-key id --sort-key asc.
         resources = 'pools'
         cmd_resources = 'lbaas_pools'
         cmd = pool.ListPool(test_cli20.MyApp(sys.stdout), None)
@@ -92,7 +130,7 @@ class CLITestV20LbPoolJSON(test_cli20.CLITestV20Base):
                                   cmd_resources=cmd_resources)
 
     def test_list_pools_limit(self):
-        """lbaas-pool-list -P."""
+        # lbaas-pool-list -P.
         resources = 'pools'
         cmd_resources = 'lbaas_pools'
         cmd = pool.ListPool(test_cli20.MyApp(sys.stdout), None)
@@ -100,7 +138,7 @@ class CLITestV20LbPoolJSON(test_cli20.CLITestV20Base):
                                   cmd_resources=cmd_resources)
 
     def test_show_pool_id(self):
-        """lbaas-pool-show test_id."""
+        # lbaas-pool-show test_id.
         resource = 'pool'
         cmd_resource = 'lbaas_pool'
         cmd = pool.ShowPool(test_cli20.MyApp(sys.stdout), None)
@@ -109,7 +147,7 @@ class CLITestV20LbPoolJSON(test_cli20.CLITestV20Base):
                                  cmd_resource=cmd_resource)
 
     def test_show_pool_id_name(self):
-        """lbaas-pool-show."""
+        # lbaas-pool-show.
         resource = 'pool'
         cmd_resource = 'lbaas_pool'
         cmd = pool.ShowPool(test_cli20.MyApp(sys.stdout), None)
@@ -119,17 +157,31 @@ class CLITestV20LbPoolJSON(test_cli20.CLITestV20Base):
                                  cmd_resource=cmd_resource)
 
     def test_update_pool(self):
-        """lbaas-pool-update myid --name newname."""
+        # lbaas-pool-update myid --name newname --description SuperPool
+        # --lb-algorithm SOURCE_IP --admin-state-up
+        # --session-persistence type=dict,type=HTTP_COOKIE,cookie_name=pie
+
         resource = 'pool'
         cmd_resource = 'lbaas_pool'
         cmd = pool.UpdatePool(test_cli20.MyApp(sys.stdout), None)
-        self._test_update_resource(resource, cmd, 'myid',
-                                   ['myid', '--name', 'newname'],
-                                   {'name': 'newname', },
+        args = ['myid', '--name', 'newname',
+                '--description', 'SuperPool', '--lb-algorithm', "SOURCE_IP",
+                '--admin-state-up', 'True',
+                '--session-persistence', 'type=dict,'
+                'type=HTTP_COOKIE,cookie_name=pie']
+        body = {'name': 'newname',
+                "description": "SuperPool",
+                "lb_algorithm": "SOURCE_IP",
+                "admin_state_up": 'True',
+                'session_persistence': {
+                    'type': 'HTTP_COOKIE',
+                    'cookie_name': 'pie',
+                }, }
+        self._test_update_resource(resource, cmd, 'myid', args, body,
                                    cmd_resource=cmd_resource)
 
     def test_delete_pool(self):
-        """lbaas-pool-delete my-id."""
+        # lbaas-pool-delete my-id.
         resource = 'pool'
         cmd_resource = 'lbaas_pool'
         cmd = pool.DeletePool(test_cli20.MyApp(sys.stdout), None)
@@ -137,7 +189,3 @@ class CLITestV20LbPoolJSON(test_cli20.CLITestV20Base):
         args = [my_id]
         self._test_delete_resource(resource, cmd, my_id, args,
                                    cmd_resource=cmd_resource)
-
-
-class CLITestV20LbPoolXML(CLITestV20LbPoolJSON):
-    format = 'xml'

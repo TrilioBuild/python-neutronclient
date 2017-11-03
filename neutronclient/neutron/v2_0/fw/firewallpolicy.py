@@ -18,7 +18,8 @@ from __future__ import print_function
 
 import argparse
 
-from neutronclient.i18n import _
+from neutronclient._i18n import _
+from neutronclient.common import utils
 from neutronclient.neutron import v2_0 as neutronv20
 
 
@@ -31,27 +32,30 @@ def _format_firewall_rules(firewall_policy):
         return ''
 
 
-def common_add_known_arguments(parser):
+def add_common_args(parser):
+    parser.add_argument(
+        '--description',
+        help=_('Description for the firewall policy.'))
     parser.add_argument(
         '--firewall-rules', type=lambda x: x.split(),
         help=_('Ordered list of whitespace-delimited firewall rule '
                'names or IDs; e.g., --firewall-rules \"rule1 rule2\"'))
 
 
-def common_args2body(client, parsed_args):
+def parse_common_args(client, parsed_args):
     if parsed_args.firewall_rules:
         _firewall_rules = []
         for f in parsed_args.firewall_rules:
             _firewall_rules.append(
                 neutronv20.find_resourceid_by_name_or_id(
                     client, 'firewall_rule', f))
-        body = {'firewall_policy': {'firewall_rules': _firewall_rules}}
+        body = {'firewall_rules': _firewall_rules}
     else:
-        body = {'firewall_policy': {}}
-    neutronv20.update_dict(parsed_args, body['firewall_policy'],
+        body = {}
+    neutronv20.update_dict(parsed_args, body,
                            ['name', 'description', 'shared',
                             'audited', 'tenant_id'])
-    return body
+    return {'firewall_policy': body}
 
 
 class ListFirewallPolicy(neutronv20.ListCommand):
@@ -82,23 +86,19 @@ class CreateFirewallPolicy(neutronv20.CreateCommand):
             metavar='NAME',
             help=_('Name for the firewall policy.'))
         parser.add_argument(
-            '--description',
-            help=_('Description for the firewall policy.'))
-        parser.add_argument(
             '--shared',
-            dest='shared',
             action='store_true',
             help=_('Create a shared policy.'),
             default=argparse.SUPPRESS)
-        common_add_known_arguments(parser)
         parser.add_argument(
             '--audited',
             action='store_true',
             help=_('Sets audited to True.'),
             default=argparse.SUPPRESS)
+        add_common_args(parser)
 
     def args2body(self, parsed_args):
-        return common_args2body(self.get_client(), parsed_args)
+        return parse_common_args(self.get_client(), parsed_args)
 
 
 class UpdateFirewallPolicy(neutronv20.UpdateCommand):
@@ -107,10 +107,21 @@ class UpdateFirewallPolicy(neutronv20.UpdateCommand):
     resource = 'firewall_policy'
 
     def add_known_arguments(self, parser):
-        common_add_known_arguments(parser)
+        add_common_args(parser)
+        parser.add_argument(
+            '--name',
+            help=_('Name for the firewall policy.'))
+        utils.add_boolean_argument(
+            parser, '--shared',
+            help=_('Update the sharing status of the policy. '
+                   '(True means shared).'))
+        utils.add_boolean_argument(
+            parser, '--audited',
+            help=_('Update the audit status of the policy. '
+                   '(True means auditing is enabled).'))
 
     def args2body(self, parsed_args):
-        return common_args2body(self.get_client(), parsed_args)
+        return parse_common_args(self.get_client(), parsed_args)
 
 
 class DeleteFirewallPolicy(neutronv20.DeleteCommand):
@@ -149,7 +160,6 @@ class FirewallPolicyInsertRule(neutronv20.UpdateCommand):
         body = {'firewall_rule_id': _rule,
                 'insert_before': _insert_before,
                 'insert_after': _insert_after}
-        neutronv20.update_dict(parsed_args, body, [])
         return body
 
     def get_parser(self, prog_name):
@@ -169,9 +179,8 @@ class FirewallPolicyInsertRule(neutronv20.UpdateCommand):
         self.add_known_arguments(parser)
         return parser
 
-    def run(self, parsed_args):
+    def take_action(self, parsed_args):
         neutron_client = self.get_client()
-        neutron_client.format = parsed_args.request_format
         body = self.args2body(parsed_args)
         _id = neutronv20.find_resourceid_by_name_or_id(neutron_client,
                                                        self.resource,
@@ -197,7 +206,6 @@ class FirewallPolicyRemoveRule(neutronv20.UpdateCommand):
                 self.get_client(), 'firewall_rule',
                 parsed_args.firewall_rule_id)
         body = {'firewall_rule_id': _rule}
-        neutronv20.update_dict(parsed_args, body, [])
         return body
 
     def get_parser(self, prog_name):
@@ -205,13 +213,13 @@ class FirewallPolicyRemoveRule(neutronv20.UpdateCommand):
         parser.add_argument(
             'firewall_rule_id',
             metavar='FIREWALL_RULE',
-            help=_('Firewall rule to remove from policy.'))
+            help=_('ID or name of the firewall rule to be removed '
+                   'from the policy.'))
         self.add_known_arguments(parser)
         return parser
 
-    def run(self, parsed_args):
+    def take_action(self, parsed_args):
         neutron_client = self.get_client()
-        neutron_client.format = parsed_args.request_format
         body = self.args2body(parsed_args)
         _id = neutronv20.find_resourceid_by_name_or_id(neutron_client,
                                                        self.resource,

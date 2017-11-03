@@ -13,6 +13,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import argparse
+
 import testtools
 
 from neutronclient.common import exceptions
@@ -41,6 +43,41 @@ class TestUtils(testtools.TestCase):
         input_str = None
         expected = {}
         self.assertEqual(expected, utils.str2dict(input_str))
+
+    def test_invalid_string_to_dictionary(self):
+        input_str = 'invalid'
+        self.assertRaises(argparse.ArgumentTypeError,
+                          utils.str2dict, input_str)
+
+    def test_str2dict_optional_keys(self):
+        self.assertDictEqual({'key1': 'value1'},
+                             utils.str2dict('key1=value1',
+                                            optional_keys=['key1', 'key2']))
+        self.assertDictEqual({'key1': 'value1', 'key2': 'value2'},
+                             utils.str2dict('key1=value1,key2=value2',
+                                            optional_keys=['key1', 'key2']))
+        e = self.assertRaises(argparse.ArgumentTypeError,
+                              utils.str2dict,
+                              'key1=value1,key2=value2,key3=value3',
+                              optional_keys=['key1', 'key2'])
+        self.assertEqual("Invalid key(s) 'key3' specified. "
+                         "Valid key(s): 'key1, key2'.",
+                         str(e))
+
+    def test_str2dict_required_keys(self):
+        self.assertDictEqual(
+            {'key1': 'value1', 'key2': 'value2', 'key3': 'value3'},
+            utils.str2dict('key1=value1,key2=value2,key3=value3',
+                           required_keys=['key1', 'key2'],
+                           optional_keys=['key3']))
+        self.assertDictEqual(
+            {'key1': 'value1', 'key2': 'value2'},
+            utils.str2dict('key1=value1,key2=value2',
+                           required_keys=['key1', 'key2']))
+        e = self.assertRaises(argparse.ArgumentTypeError,
+                              utils.str2dict, 'key1=value1',
+                              required_keys=['key1', 'key2'])
+        self.assertEqual("Required key(s) 'key2' not specified.", str(e))
 
     def test_get_dict_item_properties(self):
         item = {'name': 'test_name', 'id': 'test_id'}
@@ -101,6 +138,11 @@ class TestUtils(testtools.TestCase):
         item = Fake()
         act = utils.get_item_properties(item, fields, formatters=formatters)
         self.assertEqual(('test_name', 'test_id', 'test', 'pass'), act)
+
+    def test_is_cidr(self):
+        self.assertTrue(utils.is_valid_cidr('10.10.10.0/24'))
+        self.assertFalse(utils.is_valid_cidr('10.10.10..0/24'))
+        self.assertFalse(utils.is_valid_cidr('wrong_cidr_format'))
 
 
 class ImportClassTestCase(testtools.TestCase):

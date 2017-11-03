@@ -15,8 +15,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 #
-
-from neutronclient.i18n import _
+from neutronclient._i18n import _
+from neutronclient.common import utils
 from neutronclient.neutron import v2_0 as neutronV20
 
 
@@ -37,17 +37,36 @@ class LbaasMemberMixin(object):
             help=_('ID or name of the pool that this member belongs to.'))
 
 
+def _add_common_args(parser):
+        parser.add_argument(
+            '--name',
+            help=_('Name of the member.'))
+        parser.add_argument(
+            '--weight',
+            help=_('Weight of the member in the pool (default:1, [0..256]).'))
+
+
+def _parse_common_args(body, parsed_args):
+        neutronV20.update_dict(parsed_args, body,
+                               ['weight', 'name'])
+
+
 class ListMember(LbaasMemberMixin, neutronV20.ListCommand):
-    """LBaaS v2 List members that belong to a given tenant."""
+    """LBaaS v2 List members that belong to a given pool."""
 
     resource = 'member'
     shadow_resource = 'lbaas_member'
     list_columns = [
-        'id', 'address', 'protocol_port', 'weight',
+        'id', 'name', 'address', 'protocol_port', 'weight',
         'subnet_id', 'admin_state_up', 'status'
     ]
     pagination_support = True
     sorting_support = True
+
+    def take_action(self, parsed_args):
+        self.parent_id = _get_pool_id(self.get_client(), parsed_args.pool)
+        self.values_specs.append('--pool_id=%s' % self.parent_id)
+        return super(ListMember, self).take_action(parsed_args)
 
 
 class ShowMember(LbaasMemberMixin, neutronV20.ShowCommand):
@@ -64,13 +83,11 @@ class CreateMember(neutronV20.CreateCommand):
     shadow_resource = 'lbaas_member'
 
     def add_known_arguments(self, parser):
+        _add_common_args(parser)
         parser.add_argument(
             '--admin-state-down',
             dest='admin_state', action='store_false',
-            help=_('Set admin state up to false'))
-        parser.add_argument(
-            '--weight',
-            help=_('Weight of member in the pool (default:1, [0..256]).'))
+            help=_('Set admin state up to false.'))
         parser.add_argument(
             '--subnet',
             required=True,
@@ -92,17 +109,14 @@ class CreateMember(neutronV20.CreateCommand):
         self.parent_id = _get_pool_id(self.get_client(), parsed_args.pool)
         _subnet_id = neutronV20.find_resourceid_by_name_or_id(
             self.get_client(), 'subnet', parsed_args.subnet)
-        body = {
-            self.resource: {
-                'subnet_id': _subnet_id,
+        body = {'subnet_id': _subnet_id,
                 'admin_state_up': parsed_args.admin_state,
                 'protocol_port': parsed_args.protocol_port,
-                'address': parsed_args.address,
-            },
-        }
-        neutronV20.update_dict(parsed_args, body[self.resource],
-                               ['weight', 'subnet_id'])
-        return body
+                'address': parsed_args.address}
+        neutronV20.update_dict(parsed_args, body,
+                               ['subnet_id', 'tenant_id'])
+        _parse_common_args(body, parsed_args)
+        return {self.resource: body}
 
 
 class UpdateMember(neutronV20.UpdateCommand):
@@ -113,24 +127,21 @@ class UpdateMember(neutronV20.UpdateCommand):
 
     def add_known_arguments(self, parser):
         parser.add_argument(
-            '--admin-state-down',
-            dest='admin_state', action='store_false',
-            help=_('Set admin state up to false'))
-        parser.add_argument(
-            '--weight',
-            help=_('Weight of member in the pool (default:1, [0..256])'))
-        parser.add_argument(
             'pool', metavar='POOL',
-            help=_('ID or name of the pool that this member belongs to'))
+            help=_('ID or name of the pool that this member belongs to.'))
+        utils.add_boolean_argument(
+            parser, '--admin-state-up',
+            help=_('Update the administrative state of '
+                   'the member (True meaning "Up").'))
+        _add_common_args(parser)
 
     def args2body(self, parsed_args):
         self.parent_id = _get_pool_id(self.get_client(), parsed_args.pool)
-        body = {
-            self.resource: {}
-        }
-        neutronV20.update_dict(parsed_args, body[self.resource],
-                               ['admin_state_up', 'weight'])
-        return body
+        body = {}
+        if hasattr(parsed_args, "admin_state_up"):
+            body['admin_state_up'] = parsed_args.admin_state_up
+        _parse_common_args(body, parsed_args)
+        return {self.resource: body}
 
 
 class DeleteMember(LbaasMemberMixin, neutronV20.DeleteCommand):
