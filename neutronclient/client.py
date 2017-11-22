@@ -52,6 +52,7 @@ class HTTPClient(object):
     def __init__(self, username=None, user_id=None,
                  tenant_name=None, tenant_id=None,
                  password=None, auth_url=None,
+                 domain_name='default',
                  token=None, region_name=None, timeout=None,
                  endpoint_url=None, insecure=False,
                  endpoint_type='publicURL',
@@ -64,7 +65,9 @@ class HTTPClient(object):
         self.tenant_name = tenant_name
         self.tenant_id = tenant_id
         self.password = password
+        self.auth_version = 2
         self.auth_url = auth_url.rstrip('/') if auth_url else None
+        self.domain_name = domain_name
         self.service_type = service_type
         self.endpoint_type = endpoint_type
         self.region_name = region_name
@@ -177,21 +180,46 @@ class HTTPClient(object):
                 self.endpoint_url + url, method, **kwargs)
             return resp, body
 
-    def _extract_service_catalog(self, body):
+    def _extract_service_catalog(self, resp, body):
         """Set the client's service catalog from the response data."""
-        self.auth_ref = access.AccessInfo.factory(body=body)
-        self.service_catalog = self.auth_ref.service_catalog
-        self.auth_token = self.auth_ref.auth_token
-        self.auth_tenant_id = self.auth_ref.tenant_id
-        self.auth_user_id = self.auth_ref.user_id
+        if self.auth_version == 3:
+              try:
+                  self.auth_token = resp.headers['x-subject-token']
+                  self.auth_ref = access.AccessInfo.factory(body=body)
+                  self.service_catalog = self.auth_ref.service_catalog
+                  if not self.endpoint_url:
+                     self.endpoint_url = self.service_catalog.url_for(
+                                         attr='region', filter_value=self.region_name,
+                                         service_type=self.service_type,
+                                         endpoint_type=self.endpoint_type)
+                  return None
+              except exceptions.AmbiguousEndpoints:
+                     print("Found more than one valid endpoint. Use a more "
+                      "restrictive filter")
+                     raise
+              except KeyError:
+                     raise exceptions.AuthorizationFailure()
+              except exceptions.EndpointNotFound:
+                     print("Could not find any suitable endpoint. Correct region?")
+                     raise
+        else:
+             self.auth_ref = access.AccessInfo.factory(body=body)
+             self.service_catalog = self.auth_ref.service_catalog
+             self.auth_token = self.auth_ref.auth_token
+             self.auth_tenant_id = self.auth_ref.tenant_id
+             self.auth_user_id = self.auth_ref.user_id
 
-        if not self.endpoint_url:
-            self.endpoint_url = self.service_catalog.url_for(
-                attr='region', filter_value=self.region_name,
-                service_type=self.service_type,
-                endpoint_type=self.endpoint_type)
+             if not self.endpoint_url:
+                self.endpoint_url = self.service_catalog.url_for(
+                   attr='region', filter_value=self.region_name,
+                   service_type=self.service_type,
+                   endpoint_type=self.endpoint_type)
 
     def _authenticate_keystone(self):
+        if self.auth_url is None:
+            raise exceptions.NoAuthURLProvided()
+
+        token_url = self.auth_url + "/tokens"
         if self.user_id:
             creds = {'userId': self.user_id,
                      'password': self.password}
@@ -206,15 +234,27 @@ class HTTPClient(object):
             body = {'auth': {'passwordCredentials': creds,
                              'tenantName': self.tenant_name, }, }
 
-        if self.auth_url is None:
-            raise exceptions.NoAuthURLProvided()
+        if self.auth_url.find('v3') != -1:
+           self.auth_version = 3
+           token_url = self.auth_url + "/auth/tokens"
+           body = {"auth": {
+                "identity": {
+                         "methods": ["password"],
+                "password": {"user": {"name": self.username,
+                             "domain": { "id": self.domain_name },
+                             "password": self.password}}
+                },
+                "scope": {"project": {"domain":{"id": self.domain_name}}}}}
+           if self.tenant_id:
+              body['auth']['scope']['project']['id'] = self.tenant_id
+           else:
+                body['auth']['scope']['project']['name'] = self.tenant_name
 
-        token_url = self.auth_url + "/tokens"
         resp, resp_body = self._cs_request(token_url, "POST",
                                            body=json.dumps(body),
                                            content_type="application/json",
                                            allow_redirects=True)
-        if resp.status_code != 200:
+        if resp.status_code != 200 and resp.status_code != 201:
             raise exceptions.Unauthorized(message=resp_body)
         if resp_body:
             try:
@@ -223,7 +263,7 @@ class HTTPClient(object):
                 pass
         else:
             resp_body = None
-        self._extract_service_catalog(resp_body)
+        self._extract_service_catalog(resp, resp_body)
 
     def _authenticate_noauth(self):
         if not self.endpoint_url:
@@ -350,6 +390,7 @@ def construct_http_client(username=None,
                           tenant_id=None,
                           password=None,
                           auth_url=None,
+                          domain_name='default',
                           token=None,
                           region_name=None,
                           timeout=None,
@@ -380,6 +421,7 @@ def construct_http_client(username=None,
                           tenant_name=tenant_name,
                           user_id=user_id,
                           auth_url=auth_url,
+                          domain_name=domain_name,
                           token=token,
                           endpoint_url=endpoint_url,
                           insecure=insecure,
